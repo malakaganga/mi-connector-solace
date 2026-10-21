@@ -185,11 +185,11 @@ public final class PollSession {
                 synchronized (flows) {
                     creating.remove(key);
                     // Retirement rechecked at publication: a bind released after retire() never publishes. The
-                    // first caller's reservation is taken before the thread starts, so accept() is true here. Then
-                    // the thread, then the map entry. A Thread.start() failure leaves published false, so the
-                    // finally discards the owner that never entered the map.
-                    if (!retired) {
-                        create.accept();
+                    // first caller's reservation is taken before the thread starts. accept() is false when a
+                    // FLOW_DOWN or a FLOW_RECONNECTING invalidated the flow during the bind: nothing was counted and
+                    // the owner is not published. Then the thread, then the map entry. A Thread.start() failure
+                    // leaves published false, so the finally discards the owner that never entered the map.
+                    if (!retired && create.accept()) {
                         create.startThread();
                         flows.put(key, create);
                         published = true;
@@ -208,7 +208,7 @@ public final class PollSession {
             }
             if (!published) {
                 throw new SolaceFault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,
-                        "poll session retired during the flow bind");
+                        "poll session retired or poll flow went down during the flow bind");
             }
             return create;
         }

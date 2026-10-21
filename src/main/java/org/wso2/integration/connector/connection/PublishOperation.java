@@ -51,7 +51,7 @@ public final class PublishOperation {
     private SolaceConnection conn;
     private JCSMPSession session;
     private RequestReplySession rr;
-    // C.5 publish.startToConfirmation
+    // The start of the publish.startToConfirmation measurement.
     final long registeredNanos = System.nanoTime();
     // Guarded by this record's monitor, so expire() reads it in the same step as its own transition.
     private Stage stage = Stage.BEFORE_SEND;
@@ -99,8 +99,8 @@ public final class PublishOperation {
     }
 
     /**
-     * The operation thread moves the stage. Refused once the record is EXPIRED, so no send starts after an expiry
-     *. The claim of SENDING also reads the absolute deadline, so a spent budget never becomes a send when the
+     * The operation thread moves the stage. Refused once the record is EXPIRED, so no send starts after an
+     * expiry. The claim of SENDING also reads the absolute deadline, so a spent budget never becomes a send when the
      * watchdog is late.
      */
     public synchronized boolean enterStage(Stage next) {

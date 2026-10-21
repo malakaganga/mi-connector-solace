@@ -57,8 +57,8 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_PUB
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_UNKNOWN;
 
 /**
- * The producer lock, the pending acknowledgements and the deadline bounded send algorithm of one session
- *. One per pooled SolaceConnection and one per RequestReplySession, rebuilt with the session.
+ * The producer lock, the pending acknowledgements and the deadline bounded send algorithm of one session.
+ * One per pooled SolaceConnection and one per RequestReplySession, rebuilt with the session.
  */
 public final class SessionPublisher {
 

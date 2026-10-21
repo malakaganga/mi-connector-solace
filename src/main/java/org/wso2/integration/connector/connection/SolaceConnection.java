@@ -204,177 +204,208 @@ public class SolaceConnection implements Connection {
                     "connection " + connectionId + " owns an active transaction and its session cannot be rebuilt");
         }
         int attempt = 1;
-        while (true) {
-            // Terminal: a closed logical connection never reopens. Tested before every attempt.
-            if (lc.closed) {
-                throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                        "Solace connection '" + lc.name + "' is closed");
-            }
-            // An already spent budget never starts an attempt. Nothing was sent.
-            if (op.isExpired() || System.currentTimeMillis() >= deadlineMillis) {
-                throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                        "session " + connectionId + " could not be rebuilt within the operation's deadline", null, false);
-            }
-            try {
-                SolaceLogicalConnection.ConnectAttempt running = null;
-                CompletableFuture<Void> cleanupWait = null;
-                synchronized (publication) {
-                    if (closingHolder) {
-                        throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                                "session " + connectionId + " is closing");
-                    }
-                    running = connectAttempt;
-                    if (running != null && running.inCleanup()) {
-                        cleanupWait = running.ended;
-                    } else if (running == null && retiring != null) {
-                        cleanupWait = retiring;
-                    } else {
-                        if (running == null) {
-                            // Not connected yet. The same client name as the predecessor, so the broker evicts the
-                            // zombie.
-                            PooledSessionEventHandler candidateHandler = new PooledSessionEventHandler(this);
-                            JCSMPSession candidate = lc.createSession(String.valueOf(index), candidateHandler);
-                            candidateHandler.bind(candidate);
-                            // The reservation: one physical attempt of this holder at a time, held until its
-                            // close finished when it is not published.
-                            running = lc.startAttempt(candidate, candidateHandler, null, publication,
-                                    () -> lc.closeTracked(candidate),
-                                    cleaned -> {
-                                        if (connectAttempt == cleaned) {
-                                            connectAttempt = null;
-                                        }
-                                    });
-                            connectAttempt = running;
-                        }
-                        running.waiters++;
-                    }
-                }
-                if (cleanupWait != null) {
-                    // A failed or abandoned candidate, or the replaced session, is still being closed. No back off
-                    // and no attempt counted: this caller waits for the close under its own budget.
-                    lc.awaitCleanup(cleanupWait, op, "a previous session of " + connectionId);
-                    continue;
-                }
-                // Waits under the record's remaining budget and claims the connected session, or faults: a spent
-                // budget leaves the attempt running for the next borrower. A SolaceFault is thrown through,
-                // nothing was sent.
-                lc.awaitAttempt(running, op);
-                JCSMPSession candidate = running.session;
-                PooledSessionEventHandler candidateHandler = running.handler;
-                XMLMessageProducer candidateProducer;
-                try {
-                    // Outside every monitor.
-                    candidateProducer = candidate.getMessageProducer(publisher.eventHandler());
-                } catch (JCSMPException e) {
-                    // The creation obligation lasts through producer creation.
-                    synchronized (publication) {
-                        running.startCleanup();
-                    }
-                    throw e;
-                }
-                JCSMPSession old = null;
-                CompletableFuture<Void> oldCleanup = null;
-                SolaceFault refusal = null;
-                // The final publication: the close fence, the holder's own closing, the reservation, a candidate
-                // failure and the record's deadline and state in one transition, under the lifecycle monitor and
-                // then the publication monitor.
-                synchronized (lc.lifecycle()) {
-                    synchronized (publication) {
-                        if (lc.closed) {
-                            refusal = new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                                    "Solace connection '" + lc.name + "' is closed");
-                        } else if (closingHolder || connectAttempt != running) {
-                            refusal = new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                                    "session " + connectionId + " is closing");
-                        } else if (running.candidateFailed) {
-                            // The candidate went down before it was published: a failed connect.
-                            refusal = new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                                    "session " + connectionId + " went down before it was published");
-                        } else if (!op.publishSession(candidate, transferAtPublication)) {
-                            refusal = new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                                    "session " + connectionId + " connected after the operation's deadline", null,
-                                    false);
-                        }
-                        if (refusal != null) {
-                            running.startCleanup();
-                        } else {
-                            old = session;
-                            PooledSessionEventHandler oldHandler = handler;
-                            // The old handler is retired before the old close is queued and before the publication
-                            //.
-                            if (oldHandler != null) {
-                                oldHandler.retire();
-                            }
-                            // Detached, never closed here: the old session's close closes its consumer. The next
-                            // ensureConsumer builds the new session's consumer from the new guard.
-                            synchronized (consumerLock) {
-                                consumer = null;
-                            }
-                            session = candidate;
-                            producer = candidateProducer;
-                            handler = candidateHandler;
-                            failed = false;
-                            generation++;
-                            publisher.swap(candidate, candidateProducer);
-                            connectAttempt = null;
-                            running.published();
-                            if (old != null) {
-                                // The replaced session keeps the holder's reservation until its close finished.
-                                oldCleanup = new CompletableFuture<>();
-                                retiring = oldCleanup;
-                            }
-                        }
-                    }
-                }
-                if (refusal != null) {
-                    throw refusal;
-                }
-                if (old != null) {
-                    // The old producer dies with its session. Queued outside the monitors.
-                    CompletableFuture<Void> placeholder = oldCleanup;
-                    lc.closeTracked(old).whenComplete((ignored, error) -> {
-                        synchronized (publication) {
-                            if (retiring == placeholder) {
-                                retiring = null;
-                            }
-                        }
-                        placeholder.complete(null);
-                    });
-                }
-                lc.counters.sessionsRebuilt.increment();
-                if (generation == 1) {
-                    log.info("SolaceConnector [" + lc.name + "] session " + connectionId + " connected (generation 1)");
-                } else {
-                    log.warn("SolaceConnector [" + lc.name + "] session " + connectionId + " rebuilt (generation " + generation + ")");
-                }
-                return;
-            } catch (JCSMPException e) {
-                // The failure was the close itself: no back off.
+        // A slot of the logical connection taken for a candidate not yet created. Given back on every exit before
+        // the candidate exists.
+        boolean admitted = false;
+        try {
+            while (true) {
+                // Terminal: a closed logical connection never reopens. Tested before every attempt.
                 if (lc.closed) {
                     throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                            "Solace connection '" + lc.name + "' is closed", e);
+                            "Solace connection '" + lc.name + "' is closed");
                 }
-                long delay = Backoff.delay(lc.settings.recoveryInitialDelayMillis, lc.settings.recoveryProgression,
-                        lc.settings.recoveryMaxDelayMillis, attempt);
-                boolean budget = lc.settings.recoveryMaxAttempts >= 0 && attempt >= lc.settings.recoveryMaxAttempts;
-                // The configured connect retries bound the physical attempts of this loop, each connecting once. The
-                // value -1 is unlimited with the back off.
-                boolean retriesSpent = lc.connectRetries >= 0 && attempt > lc.connectRetries;
-                boolean deadline = op.isExpired() || System.currentTimeMillis() + delay >= deadlineMillis;
-                if (budget || retriesSpent || deadline) {
-                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                            "session " + connectionId + " could not be rebuilt: " + e.getMessage(), e);
+                // An already spent budget never starts an attempt. Nothing was sent.
+                if (op.isExpired() || System.currentTimeMillis() >= deadlineMillis) {
+                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                            "session " + connectionId + " could not be rebuilt within the operation's deadline", null, false);
                 }
-                log.warn("SolaceConnector [" + lc.name + "] session " + connectionId + " rebuild attempt " + attempt
-                        + " failed; next in " + delay + " ms: " + e.getMessage());
                 try {
-                    Thread.sleep(delay);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
-                            "interrupted while rebuilding session " + connectionId, ie, false);
+                    SolaceLogicalConnection.ConnectAttempt running = null;
+                    CompletableFuture<Void> cleanupWait = null;
+                    boolean needsSlot = false;
+                    synchronized (publication) {
+                        if (closingHolder) {
+                            throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                    "session " + connectionId + " is closing");
+                        }
+                        running = connectAttempt;
+                        if (running != null && running.inCleanup()) {
+                            cleanupWait = running.ended;
+                        } else if (running == null && retiring != null) {
+                            cleanupWait = retiring;
+                        } else if (running == null && !admitted) {
+                            // A new candidate needs a slot of the logical connection first. The pool can replace this
+                            // holder, so the holder's own reservation does not bound the physical sessions.
+                            needsSlot = true;
+                        } else {
+                            if (running == null) {
+                                // Not connected yet. The same client name as the predecessor, so the broker evicts the
+                                // zombie.
+                                PooledSessionEventHandler candidateHandler = new PooledSessionEventHandler(this);
+                                JCSMPSession candidate = lc.createSession(String.valueOf(index), candidateHandler);
+                                candidateHandler.bind(candidate);
+                                // The reservation: one physical attempt of this holder at a time, held until its
+                                // close finished when it is not published. The slot goes with the candidate: back when
+                                // its close finished, or kept by the session once published.
+                                running = lc.startAttempt(candidate, candidateHandler, null, publication,
+                                        () -> lc.closeTracked(candidate)
+                                                .whenComplete((ignored, error) -> lc.releasePooledSession()),
+                                        cleaned -> {
+                                            if (connectAttempt == cleaned) {
+                                                connectAttempt = null;
+                                            }
+                                        });
+                                admitted = false;
+                                connectAttempt = running;
+                            }
+                            running.waiters++;
+                        }
+                    }
+                    if (needsSlot) {
+                        // Outside the monitors and under the record's budget. Then the close, the deadline and this
+                        // holder's state are read again before anything is created.
+                        lc.admitPooledSession(op, connectionId);
+                        admitted = true;
+                        continue;
+                    }
+                    if (cleanupWait != null) {
+                        // A failed or abandoned candidate, or the replaced session, is still being closed. No back off
+                        // and no attempt counted: this caller waits for the close under its own budget.
+                        lc.awaitCleanup(cleanupWait, op, "a previous session of " + connectionId);
+                        continue;
+                    }
+                    // Waits under the record's remaining budget and claims the connected session, or faults: a spent
+                    // budget leaves the attempt running for the next borrower. A SolaceFault is thrown through,
+                    // nothing was sent.
+                    lc.awaitAttempt(running, op);
+                    JCSMPSession candidate = running.session;
+                    PooledSessionEventHandler candidateHandler = running.handler;
+                    XMLMessageProducer candidateProducer;
+                    try {
+                        // Outside every monitor.
+                        candidateProducer = candidate.getMessageProducer(publisher.eventHandler());
+                    } catch (JCSMPException e) {
+                        // The creation obligation lasts through producer creation.
+                        synchronized (publication) {
+                            running.startCleanup();
+                        }
+                        throw e;
+                    }
+                    JCSMPSession old = null;
+                    CompletableFuture<Void> oldCleanup = null;
+                    SolaceFault refusal = null;
+                    // The final publication: the close fence, the holder's own closing, the reservation, a candidate
+                    // failure and the record's deadline and state in one transition, under the lifecycle monitor and
+                    // then the publication monitor.
+                    synchronized (lc.lifecycle()) {
+                        synchronized (publication) {
+                            if (lc.closed) {
+                                refusal = new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                        "Solace connection '" + lc.name + "' is closed");
+                            } else if (closingHolder || connectAttempt != running) {
+                                refusal = new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                        "session " + connectionId + " is closing");
+                            } else if (running.candidateFailed) {
+                                // The candidate went down before it was published: a failed connect.
+                                refusal = new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                        "session " + connectionId + " went down before it was published");
+                            } else if (!op.publishSession(candidate, transferAtPublication)) {
+                                refusal = new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                                        "session " + connectionId + " connected after the operation's deadline", null,
+                                        false);
+                            }
+                            if (refusal != null) {
+                                running.startCleanup();
+                            } else {
+                                old = session;
+                                PooledSessionEventHandler oldHandler = handler;
+                                // The old handler is retired before the old close is queued and before the
+                                // publication.
+                                if (oldHandler != null) {
+                                    oldHandler.retire();
+                                }
+                                // Detached, never closed here: the old session's close closes its consumer. The next
+                                // ensureConsumer builds the new session's consumer from the new guard.
+                                synchronized (consumerLock) {
+                                    consumer = null;
+                                }
+                                session = candidate;
+                                producer = candidateProducer;
+                                handler = candidateHandler;
+                                failed = false;
+                                generation++;
+                                publisher.swap(candidate, candidateProducer);
+                                connectAttempt = null;
+                                running.published();
+                                if (old != null) {
+                                    // The replaced session keeps the holder's reservation until its close finished.
+                                    oldCleanup = new CompletableFuture<>();
+                                    retiring = oldCleanup;
+                                }
+                            }
+                        }
+                    }
+                    if (refusal != null) {
+                        throw refusal;
+                    }
+                    if (old != null) {
+                        // The old producer dies with its session. Queued outside the monitors.
+                        CompletableFuture<Void> placeholder = oldCleanup;
+                        lc.closeTracked(old).whenComplete((ignored, error) -> {
+                            // The replaced session's slot goes back once its close finished.
+                            lc.releasePooledSession();
+                            synchronized (publication) {
+                                if (retiring == placeholder) {
+                                    retiring = null;
+                                }
+                            }
+                            placeholder.complete(null);
+                        });
+                    }
+                    lc.counters.sessionsRebuilt.increment();
+                    if (generation == 1) {
+                        log.info("SolaceConnector [" + lc.name + "] session " + connectionId + " connected (generation 1)");
+                    } else {
+                        log.warn("SolaceConnector [" + lc.name + "] session " + connectionId + " rebuilt (generation " + generation + ")");
+                    }
+                    return;
+                } catch (JCSMPException e) {
+                    // createSession failed, so no session exists: the slot goes back at once.
+                    if (admitted) {
+                        admitted = false;
+                        lc.releasePooledSession();
+                    }
+                    // The failure was the close itself: no back off.
+                    if (lc.closed) {
+                        throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                "Solace connection '" + lc.name + "' is closed", e);
+                    }
+                    long delay = Backoff.delay(lc.settings.recoveryInitialDelayMillis, lc.settings.recoveryProgression,
+                            lc.settings.recoveryMaxDelayMillis, attempt);
+                    boolean budget = lc.settings.recoveryMaxAttempts >= 0 && attempt >= lc.settings.recoveryMaxAttempts;
+                    // The configured connect retries bound the physical attempts of this loop, each connecting once.
+                    // The value -1 is unlimited with the back off.
+                    boolean retriesSpent = lc.connectRetries >= 0 && attempt > lc.connectRetries;
+                    boolean deadline = op.isExpired() || System.currentTimeMillis() + delay >= deadlineMillis;
+                    if (budget || retriesSpent || deadline) {
+                        throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                "session " + connectionId + " could not be rebuilt: " + e.getMessage(), e);
+                    }
+                    log.warn("SolaceConnector [" + lc.name + "] session " + connectionId + " rebuild attempt " + attempt
+                            + " failed; next in " + delay + " ms: " + e.getMessage());
+                    try {
+                        Thread.sleep(delay);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                "interrupted while rebuilding session " + connectionId, ie, false);
+                    }
+                    attempt++;
                 }
-                attempt++;
+            }
+        } finally {
+            if (admitted) {
+                lc.releasePooledSession();
             }
         }
     }
@@ -1090,6 +1121,11 @@ public class SolaceConnection implements Connection {
         }
         // Completes the pending acknowledgement futures exceptionally, inline, no broker call.
         publisher.failPending("Connection " + connectionId + " closed before publish ACK was received");
+        // A holder that never connected queues nothing, so the closer queue grows with physical sessions only.
+        if (sessionToClose == null && consumerToClose == null && producerToClose == null && transactedSession == null
+                && transactedProducer == null && transactedFlows.isEmpty()) {
+            return;
+        }
         lc.closer.execute(() -> {
             try {
                 if (consumerToClose != null) {
@@ -1128,9 +1164,15 @@ public class SolaceConnection implements Connection {
                 log.debug("Solace connection " + connectionId + ": transacted session close failed", e);
             }
             if (sessionToClose != null) {
-                Hooks.get().point("closer.beforeClose", sessionToClose);
-                SolaceLogicalConnection.closeQuietly(sessionToClose);
-                log.info("Solace connection closed: " + connectionId);
+                try {
+                    Hooks.get().point("closer.beforeClose", sessionToClose);
+                    SolaceLogicalConnection.closeQuietly(sessionToClose);
+                    log.info("Solace connection closed: " + connectionId);
+                } finally {
+                    // The installed session's slot goes back once its close finished, not when the holder left
+                    // the pool.
+                    lc.releasePooledSession();
+                }
             }
         });
     }

@@ -270,6 +270,9 @@ public final class SolaceConstants {
     public static final long TX_COMPLETION_WAIT_MS = 30000L;
     // Applied when the init template gives no maxWaitTime.
     public static final String DEFAULT_POOL_MAX_WAIT_MS = "10000";
+    // The commons-pool default of maxActiveConnections, and the exhausted action that lets the pool grow past it.
+    public static final int DEFAULT_POOL_MAX_ACTIVE = 8;
+    public static final String WHEN_EXHAUSTED_GROW = "WHEN_EXHAUSTED_GROW";
 
     // 2.0.0 fault names, the first token of every fault message
     public static final String FAULT_CONNECTION_ERROR = "CONNECTION_ERROR";

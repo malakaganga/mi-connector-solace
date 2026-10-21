@@ -98,7 +98,11 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
                 lc.armExistenceCheck();
                 log.info("SolaceConnector [" + connectionName + "] initialised (pool maxActive "
                         + (cfg.getMaxActiveConnections() == null ? "8 (default)" : cfg.getMaxActiveConnections())
-                        + ", maxWait " + cfg.getMaxWaitTime() + " ms)");
+                        + ", maxWait " + cfg.getMaxWaitTime() + " ms, "
+                        + (settings.pooledSessionLimit == Integer.MAX_VALUE
+                                ? "no limit on the pooled physical sessions because the pool can grow"
+                                : "at most " + settings.pooledSessionLimit + " pooled physical sessions")
+                        + ")");
                 if (settings.clientNameStrict) {
                     // Strict mode gives pooled session 1 the name verbatim, and a duplicate name loops on
                     // evictions.

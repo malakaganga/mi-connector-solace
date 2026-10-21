@@ -36,6 +36,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.AUTHENTIC
 import static org.wso2.integration.connector.constants.SolaceConstants.AUTH_SCHEME_OAUTH2;
 import static org.wso2.integration.connector.constants.SolaceConstants.CLIENT_NAME;
 import static org.wso2.integration.connector.constants.SolaceConstants.CLIENT_NAME_STRICT;
+import static org.wso2.integration.connector.constants.SolaceConstants.DEFAULT_POOL_MAX_ACTIVE;
 import static org.wso2.integration.connector.constants.SolaceConstants.DEFAULT_MAX_CONCURRENT_REQUESTS;
 import static org.wso2.integration.connector.constants.SolaceConstants.DEFAULT_MAX_POLL_FLOWS;
 import static org.wso2.integration.connector.constants.SolaceConstants.DEFAULT_POLL_ACK_TIMEOUT_MS;
@@ -55,6 +56,9 @@ import static org.wso2.integration.connector.constants.SolaceConstants.RECOVERY_
 import static org.wso2.integration.connector.constants.SolaceConstants.REQUIRE_OUTCOMES_AUTO;
 import static org.wso2.integration.connector.constants.SolaceConstants.REQUIRE_OUTCOMES_TRUE;
 import static org.wso2.integration.connector.constants.SolaceConstants.REQUIRE_SETTLEMENT_OUTCOMES;
+import static org.wso2.integration.connector.constants.SolaceConstants.WHEN_EXHAUSTED_GROW;
+import static org.wso2.integration.connector.core.util.Constants.EXHAUSTED_ACTION;
+import static org.wso2.integration.connector.core.util.Constants.MAX_ACTIVE_CONNECTIONS;
 
 /**
  * The 2.0.0 connection parameters of a logical connection, parsed once from the init template.
@@ -81,6 +85,9 @@ public final class ConnectionSettings {
     // Minus one leaves the JCSMP default.
     public final long keepAliveIntervalMillis;
     public final int keepAliveLimit;
+    // The pooled physical sessions of the logical connection at most: twice maxActiveConnections, the installed
+    // sessions and one replacement each. Integer.MAX_VALUE for a pool without a fixed size.
+    public final int pooledSessionLimit;
     public final List<String> errors;
 
     private ConnectionSettings(MessageContext messageContext) {
@@ -153,6 +160,13 @@ public final class ConnectionSettings {
         if (keepAliveLimit != -1 && keepAliveLimit < 1) {
             collected.add(KEEP_ALIVE_LIMIT + " must be at least 1, got " + keepAliveLimit);
         }
+
+        // The pool reads the same two parameters. A negative maxActiveConnections or WHEN_EXHAUSTED_GROW lets the
+        // pool grow without a bound, so no limit is derived from it. The pool maps any other action to a fixed size.
+        int maxActive = parseInt(parameter(messageContext, MAX_ACTIVE_CONNECTIONS), MAX_ACTIVE_CONNECTIONS,
+                DEFAULT_POOL_MAX_ACTIVE, collected);
+        this.pooledSessionLimit = maxActive < 0 || WHEN_EXHAUSTED_GROW.equals(parameter(messageContext, EXHAUSTED_ACTION))
+                ? Integer.MAX_VALUE : (int) Math.min(Integer.MAX_VALUE, 2L * maxActive);
 
         String tokenFile = parameter(messageContext, OAUTH2_TOKEN_FILE);
         String authScheme = parameter(messageContext, AUTHENTICATION_SCHEME);

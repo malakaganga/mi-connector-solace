@@ -117,6 +117,11 @@ public final class SolaceLogicalConnection {
     private CompletableFuture<Void> pollRetiring;
     // Guarded by dedicated. PollSession's generation number.
     int pollGeneration;
+    // The pooled physical sessions that are connecting, installed or being closed, those of holders the pool
+    // already destroyed included. Guarded by pooledSlots, which is never held while another monitor is taken. The
+    // dedicated sessions keep their own reservations and are not counted.
+    private final Object pooledSlots = new Object();
+    private int pooledSessions;
     // Owner tokens of the two creation reservations (the attachment table).
     static final Object POLL_CREATION = new Object();
     static final Object RR_CREATION = new Object();
@@ -439,6 +444,47 @@ public final class SolaceLogicalConnection {
                     what + " connected after the operation's deadline", null, false);
         }
         return null;
+    }
+
+    /**
+     * Holder thread, outside every other monitor, before a pooled candidate is created. Waits under the record's
+     * remaining budget for a free slot below settings.pooledSessionLimit. From here the slot belongs to one physical
+     * session. It goes back once: at once when no session was created, otherwise when that session's close
+     * finished. Returning or destroying its holder never gives it back.
+     */
+    void admitPooledSession(PublishOperation op, String connectionId) throws SolaceFault {
+        synchronized (pooledSlots) {
+            while (pooledSessions >= settings.pooledSessionLimit) {
+                if (closed) {
+                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                            "Solace connection '" + name + "' is closed");
+                }
+                long remaining = op.remaining();
+                if (op.isExpired() || remaining <= 0) {
+                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED, "session " + connectionId
+                            + " could not be rebuilt within the operation's deadline: all "
+                            + settings.pooledSessionLimit + " pooled sessions of '" + name
+                            + "' are connecting, in use or being closed", null, false);
+                }
+                try {
+                    pooledSlots.wait(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                            "interrupted while session " + connectionId + " waited for a free pooled session", e,
+                            false);
+                }
+            }
+            pooledSessions++;
+        }
+    }
+
+    /** Once per admitted pooled session. Any thread, under any monitor: it takes pooledSlots only. */
+    void releasePooledSession() {
+        synchronized (pooledSlots) {
+            pooledSessions--;
+            pooledSlots.notifyAll();
+        }
     }
 
     /** The lifecycle monitor, for the final publication of a pooled session. */
@@ -986,6 +1032,10 @@ public final class SolaceLogicalConnection {
             closed = true;
             poll = pollSession;
             replySession = rrSession;
+        }
+        // A caller waiting for a pooled session slot sees the close at once.
+        synchronized (pooledSlots) {
+            pooledSlots.notifyAll();
         }
         // Each retire submits its closes and detaches itself when done.
         if (replySession != null) {

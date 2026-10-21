@@ -612,7 +612,7 @@
               "inputType": "string",
               "defaultValue": "8",
               "required": "false",
-              "helpTip": "Maximum number of pooled sessions."
+              "helpTip": "Maximum number of pooled sessions. The connection keeps at most twice this number of pooled physical sessions, counting those still connecting or being closed."
             }
           },
           {
@@ -668,7 +668,7 @@
               "comboValues": ["WHEN_EXHAUSTED_BLOCK", "WHEN_EXHAUSTED_FAIL", "WHEN_EXHAUSTED_GROW"],
               "defaultValue": "WHEN_EXHAUSTED_BLOCK",
               "required": "false",
-              "helpTip": "What a borrow does when every pooled session is in use. WHEN_EXHAUSTED_BLOCK waits up to Max Wait Time, WHEN_EXHAUSTED_FAIL faults at once, WHEN_EXHAUSTED_GROW creates one more session."
+              "helpTip": "What a borrow does when every pooled session is in use. WHEN_EXHAUSTED_BLOCK waits up to Max Wait Time, WHEN_EXHAUSTED_FAIL faults at once, WHEN_EXHAUSTED_GROW creates one more session and removes the limit on pooled physical sessions."
             }
           }
         ]

@@ -31,7 +31,7 @@ public final class PollRequest {
 
     public final long deadline;
     public final String ackMode;
-    // The start of the C.5 poll.requestToResult measurement.
+    // The start of the poll.requestToResult measurement.
     public final long createdNanos = System.nanoTime();
     public int state = QUEUED;
     public BytesXMLMessage result;

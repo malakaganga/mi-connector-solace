@@ -132,7 +132,10 @@ public final class PollFlowOwner implements Runnable {
         }
     }
 
-    /** Exactly once per accepted request, at the release points guide 3.5 lists. */
+    /**
+     * Exactly once per accepted request: after the owner served it, when it was dropped as expired, or when a
+     * closed owner refused or discarded it.
+     */
     private void finishRequest() {
         synchronized (state) {
             busy--;

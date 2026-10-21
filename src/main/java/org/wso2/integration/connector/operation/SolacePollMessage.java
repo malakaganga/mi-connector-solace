@@ -229,7 +229,7 @@ public class SolacePollMessage extends AbstractConnectorOperation {
                     lease = null;
                 }
             }
-            // C.5
+            // The measurement from the request to its result.
             Hooks.get().record("poll.requestToResult", System.nanoTime() - request.createdNanos);
             if (lease != null) {
                 messageContext.setProperty(SolaceConstants.SOLACE_POLL_MESSAGE, lease);
