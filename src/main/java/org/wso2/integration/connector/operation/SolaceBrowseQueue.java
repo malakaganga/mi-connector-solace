@@ -27,6 +27,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.wso2.integration.connector.SolaceFault;
 import org.wso2.integration.connector.connection.SolaceConnection;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnectorOperation;
@@ -59,7 +60,14 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
         ConnectionHandler handler = ConnectionHandler.getConnectionHandler();
         SolaceConnection connection = null;
         try {
+            String timeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                    SolaceConstants.BROWSE_TIMEOUT);
+            long timeout = SolaceUtils.parseLongOrDefault(timeoutStr,
+                    SolaceConstants.DEFAULT_BROWSE_TIMEOUT_MS, SolaceConstants.BROWSE_TIMEOUT);
+
             connection = (SolaceConnection) handler.getConnection(SolaceConstants.CONNECTOR_NAME, connectionName);
+            // The first call after the borrow: connects the holder on first use, or rebuilds it (guide 3.3).
+            connection.ensureSession(System.currentTimeMillis() + timeout);
             if (connection == null || !connection.isConnected()) {
                 handleException("Solace connection is not available or not connected.", messageContext);
                 return;
@@ -80,11 +88,6 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
                 handleException("maxMessages must be > 0 (got " + maxMessages + ").", messageContext);
                 return;
             }
-
-            String timeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.BROWSE_TIMEOUT);
-            long timeout = SolaceUtils.parseLongOrDefault(timeoutStr,
-                    SolaceConstants.DEFAULT_BROWSE_TIMEOUT_MS, SolaceConstants.BROWSE_TIMEOUT);
 
             String selector = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                     SolaceConstants.SELECTOR);
@@ -113,6 +116,11 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
             handleConnectorResponse(messageContext, responseVariable, overwriteBody,
                     messagesJson.toString(), null, attributes);
 
+        } catch (SolaceFault fault) {
+            String text = fault.name + ": " + fault.getMessage();
+            ConnectorUtils.setErrorPropertiesToMessage(messageContext, String.valueOf(fault.code), text);
+            handleException(text, fault.getCause() instanceof Exception ? (Exception) fault.getCause() : null,
+                    messageContext);
         } catch (JCSMPException e) {
             handleException("Solace browse failed: " + e.getMessage(), e, messageContext);
         } catch (Exception e) {
@@ -120,7 +128,7 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
                     e, messageContext);
         } finally {
             if (connection != null) {
-                handler.returnConnection(SolaceConstants.CONNECTOR_NAME, connectionName, connection);
+                connection.returnToPool();
             }
         }
     }

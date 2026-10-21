@@ -16,9 +16,21 @@
           "type": "string",
           "description": "The negative settlement outcome applied to the message (FAILED for redelivery, REJECTED for DMQ/discard)."
         },
+        "mode": {
+          "type": "string",
+          "description": "DEFERRED when the decision was handed to the inbound endpoint through its settlement handle. DIRECT when this operation settled the message with the broker, on the inbound 1.x path or on a poll flow owner."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Present only when settled is false. ALREADY_DECIDED when an earlier operation decided first, LATE when the inbound endpoint decided first, STALE_DELIVERY when the poll flow that received the message is already closed."
+        },
+        "ageMillis": {
+          "type": "integer",
+          "description": "Present only when reason is LATE. The age of the inbound endpoint's decision in milliseconds."
+        },
         "ackMessageId": {
           "type": "integer",
-          "description": "The broker-assigned ack message id of the settled message. Present only when the message carried a non-zero ack message id."
+          "description": "The ack message id the broker assigned to the settled message. Present only in DIRECT mode and only when it is not zero."
         },
         "settledAt": {
           "type": "integer",
@@ -28,6 +40,7 @@
       "required": [
         "settled",
         "outcome",
+        "mode",
         "settledAt"
       ],
       "additionalProperties": false
@@ -43,11 +56,24 @@
         "outcome": {
           "type": "string",
           "description": "The negative settlement outcome applied to the message (FAILED or REJECTED)."
+        },
+        "mode": {
+          "type": "string",
+          "description": "DEFERRED when the decision was handed to the inbound endpoint through its settlement handle. DIRECT when this operation settled the message with the broker."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Present only when settled is false. ALREADY_DECIDED, LATE or STALE_DELIVERY."
+        },
+        "ageMillis": {
+          "type": "integer",
+          "description": "Present only when reason is LATE. The age of the inbound endpoint's decision in milliseconds."
         }
       },
       "required": [
         "settled",
-        "outcome"
+        "outcome",
+        "mode"
       ],
       "additionalProperties": false
     },

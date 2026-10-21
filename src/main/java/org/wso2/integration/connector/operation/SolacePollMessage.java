@@ -27,17 +27,41 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
 import org.apache.synapse.core.axis2.Axis2MessageContext;
 import org.json.JSONObject;
-import org.wso2.integration.connector.connection.SolaceConnection;
+import org.wso2.integration.connector.SolaceFault;
+import org.wso2.integration.connector.connection.LogicalConnections;
+import org.wso2.integration.connector.connection.PollFlowOwner;
+import org.wso2.integration.connector.connection.PollLease;
+import org.wso2.integration.connector.connection.PollRequest;
+import org.wso2.integration.connector.connection.PollSession;
+import org.wso2.integration.connector.connection.PublishOperation;
+import org.wso2.integration.connector.connection.SolaceLogicalConnection;
 import org.wso2.integration.connector.connection.SolaceTransactionRegistry;
+import org.wso2.integration.connector.connection.TransactionBridge;
+import org.wso2.integration.connector.connection.TransactionCommand;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnectorOperation;
-import org.wso2.integration.connector.core.connection.ConnectionHandler;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
+import org.wso2.integration.connector.hooks.Hooks;
 import org.wso2.integration.connector.utils.SolaceUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Executor;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.ACK_MODE_AUTO;
+import static org.wso2.integration.connector.constants.SolaceConstants.ACK_MODE_CLIENT;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_INBOUND_TRANSACTION;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_INVALID_CONFIG;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_POLL_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_POLL_UNSETTLED;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_INBOUND_TRANSACTION;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_INVALID_CONFIG;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POLL_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POLL_UNSETTLED;
 
 /**
  * Synchronously polls one message from a Solace queue. Returns null on timeout.
@@ -47,20 +71,13 @@ import java.util.Map;
  * (accessible via {@code ${vars.X.attributes.messageId}}) and as legacy
  * {@code solace.*} message-context properties.
  *
- * <p><b>Settlement model — depends on whether the operation runs inside a transaction:</b></p>
- * <ul>
- *   <li><b>Outside a transaction (default):</b> the message is acked on receipt, before
- *       this operation returns. If mediation fails afterwards the message is gone — no
- *       redelivery. Suitable for at-most-once / idempotent processing only.</li>
- *   <li><b>Inside a transaction</b> (caller wrapped this poll in {@code beginTransaction}
- *       and presence of the {@code solace.tx.connectionId} property is detected): the
- *       message is held by the broker until the surrounding {@code commit} (acked) or
- *       {@code rollback} (redelivered). This gives at-least-once semantics. Recommended
- *       for any consume-then-process flow where mediation can fail.</li>
- * </ul>
- *
- * <p>Manual ack/nack of polled messages is intentionally not supported — settlement is
- * either implicit (non-tx, on receipt) or transaction-scoped (commit/rollback).</p>
+ * <p>Settlement in 2.0.0 (guide 3.5, design 7.10). Outside a transaction the poll runs on a cached flow owned by
+ * one thread per queue and selector. With ackMode=AUTO the owner acknowledges the message right after it handed
+ * the message to this call, at most once. With ackMode=CLIENT the owner's lease is stashed under
+ * solace.poll.message and the sequence settles it with acknowledgeMessage or nackMessage and target=POLL before
+ * pollAckTimeout passes, otherwise the connector settles it FAILED and the broker redelivers it. Inside a
+ * connector owned transaction the 1.0.1 transacted poll applies: the broker holds the message until commit or
+ * rollback. A poll inside an inbound owned transaction is refused.</p>
  */
 public class SolacePollMessage extends AbstractConnectorOperation {
 
@@ -74,8 +91,6 @@ public class SolacePollMessage extends AbstractConnectorOperation {
             return;
         }
 
-        ConnectionHandler handler = ConnectionHandler.getConnectionHandler();
-
         // Detect transactional context the same way publish does — if the caller wrapped
         // this poll in beginTransaction, route to the transacted path so settlement is
         // deferred to commit/rollback (rollback redelivers; non-transacted poll loses).
@@ -87,62 +102,159 @@ public class SolacePollMessage extends AbstractConnectorOperation {
                     + ", connectionName=" + connectionName);
         }
 
-        SolaceConnection connection = null;
-        try {
-            if (isTransactional) {
-                connection = SolaceTransactionRegistry.get(txId);
-                if (connection == null) {
-                    log.error("solace.poll: txId=" + txId + " not found in TransactionRegistry");
-                    handleException("Transaction " + txId + " not found", messageContext);
-                    return;
-                }
-                log.info("solace.poll: txId=" + txId
-                        + " resolved to connectionId=" + connection.getConnectionId());
-            } else {
-                connection = (SolaceConnection) handler.getConnection(
-                        SolaceConstants.CONNECTOR_NAME, connectionName);
-                if (connection == null || !connection.isConnected()) {
-                    handleException("Solace connection is not available or not connected.", messageContext);
-                    return;
-                }
-            }
+        // D22: a poll inside an inbound owned transaction has no defined settlement.
+        if (messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_TX) instanceof Executor) {
+            fault(FAULT_INBOUND_TRANSACTION, ERROR_CODE_INBOUND_TRANSACTION,
+                    "poll is not supported inside an inbound-owned transaction (D22)", null, messageContext);
+            return;
+        }
 
-            String queueName = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.QUEUE_NAME);
-            if (StringUtils.isEmpty(queueName)) {
-                handleException("Queue name is required for poll operation.", messageContext);
+        String queueName = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                SolaceConstants.QUEUE_NAME);
+        if (StringUtils.isEmpty(queueName)) {
+            handleException("Queue name is required for poll operation.", messageContext);
+            return;
+        }
+
+        String timeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                SolaceConstants.POLL_TIMEOUT);
+        long timeout = SolaceUtils.parseLongOrDefault(timeoutStr,
+                SolaceConstants.DEFAULT_POLL_TIMEOUT_MS, SolaceConstants.POLL_TIMEOUT);
+
+        String selector = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                SolaceConstants.SELECTOR);
+        // An empty selector means no selector, as the 1.0.1 flow creation read it.
+        if (StringUtils.isEmpty(selector)) {
+            selector = null;
+        }
+
+        if (isTransactional) {
+            // Connector owned (3.7): the 1.0.1 transacted poll, now always on the transaction's executor thread.
+            final SolaceTransactionRegistry.Entry entry = SolaceTransactionRegistry.get(txId);
+            if (entry == null) {
+                log.error("solace.poll: txId=" + txId + " not found in TransactionRegistry");
+                handleException("Transaction " + txId + " not found", messageContext);
                 return;
             }
-
-            String timeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.POLL_TIMEOUT);
-            long timeout = SolaceUtils.parseLongOrDefault(timeoutStr,
-                    SolaceConstants.DEFAULT_POLL_TIMEOUT_MS, SolaceConstants.POLL_TIMEOUT);
-
-            String selector = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.SELECTOR);
+            log.info("solace.poll: txId=" + txId
+                    + " resolved to connectionId=" + entry.connection.getConnectionId());
 
             if (log.isDebugEnabled()) {
                 log.debug("Polling queue '" + queueName + "' (timeout=" + timeout + "ms"
                         + (selector != null ? ", selector='" + selector + "'" : "")
                         + ", transactional=" + isTransactional + ")");
             }
-
-            BytesXMLMessage message = isTransactional
-                    ? connection.pollTransacted(queueName, timeout, selector)
-                    : connection.pollMessage(queueName, timeout, selector);
-            writeResult(messageContext, message, queueName, responseVariable, overwriteBody);
-
-        } catch (JCSMPException e) {
-            handleException("Solace poll failed: " + e.getMessage(), e, messageContext);
-        } catch (Exception e) {
-            handleException("Solace poll operation failed (connection: " + connectionName + ")",
-                    e, messageContext);
-        } finally {
-            // Pinned (transactional) connection stays held until commit/rollback.
-            if (!isTransactional && connection != null) {
-                handler.returnConnection(SolaceConstants.CONNECTOR_NAME, connectionName, connection);
+            final String pollSelector = selector;
+            try {
+                BytesXMLMessage message = TransactionBridge.submitAndWait(entry.executor,
+                        new TransactionCommand<>(() -> entry.connection.pollTransacted(queueName, timeout, pollSelector),
+                                timeout),
+                        "poll", FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR, messageContext);
+                writeResult(messageContext, message, queueName, responseVariable, overwriteBody, null, null);
+            } catch (SolaceFault fault) {
+                fault(fault, messageContext, responseVariable);
+            } catch (Exception e) {
+                fault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,
+                        "Solace poll operation failed (connection: " + connectionName + ")", e, messageContext);
             }
+            return;
+        }
+
+        String ackModeRaw = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.ACK_MODE);
+        String ackMode = StringUtils.isEmpty(ackModeRaw) ? ACK_MODE_AUTO : ackModeRaw.trim().toUpperCase(Locale.ROOT);
+        if (!ACK_MODE_AUTO.equals(ackMode) && !ACK_MODE_CLIENT.equals(ackMode)) {
+            fault(FAULT_INVALID_CONFIG, ERROR_CODE_INVALID_CONFIG,
+                    "ackMode must be AUTO or CLIENT, got '" + ackModeRaw + "'", null, messageContext);
+            return;
+        }
+        // Before any receive: a second CLIENT poll while a polled message is still unsettled (D16).
+        Object stashed = messageContext.getProperty(SolaceConstants.SOLACE_POLL_MESSAGE);
+        if (ACK_MODE_CLIENT.equals(ackMode) && stashed instanceof PollLease
+                && ((PollLease) stashed).state == PollLease.OUTSTANDING) {
+            fault(FAULT_POLL_UNSETTLED, ERROR_CODE_POLL_UNSETTLED,
+                    "a polled message is still unsettled in this message context; settle it with acknowledgeMessage or nackMessage (target=POLL) before polling again",
+                    null, messageContext);
+            return;
+        }
+
+        if (log.isDebugEnabled()) {
+            log.debug("Polling queue '" + queueName + "' (timeout=" + timeout + "ms"
+                    + (selector != null ? ", selector='" + selector + "'" : "")
+                    + ", ackMode=" + ackMode + ")");
+        }
+
+        SolaceLogicalConnection lc = LogicalConnections.get(connectionName);
+        if (lc == null) {
+            fault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                    "Solace connection '" + connectionName + "' is not initialised", null, messageContext);
+            return;
+        }
+
+        // No pooled connection is borrowed on this path.
+        PollRequest request = null;
+        try {
+            // The phase A record of the poll timeout. It bounds the poll session's first connect only (3.3) and
+            // faults CONNECTION_ERROR at once on a closed connection.
+            PublishOperation setup = PublishOperation.register(lc, timeout);
+            PollSession pollSession;
+            try {
+                // Lazily created, rebuilt on the next use after DOWN_ERROR.
+                pollSession = lc.pollSession(setup);
+            } finally {
+                // The record ends here, before the bind and the request. Both are bounded by the session's
+                // readTimeout and the request deadline.
+                setup.finish();
+            }
+            // May fault POLL_FLOW_LIMIT or INVALID_CONFIG. Binds on this thread.
+            PollFlowOwner owner = pollSession.ownerFor(queueName, selector);
+            request = new PollRequest(System.currentTimeMillis() + timeout, ackMode);
+            // The timeout covers the wait for the owner's turn as well as the receive (8.2).
+            owner.submit(request);
+            BytesXMLMessage message;
+            PollLease lease;
+            synchronized (request) {
+                long remaining;
+                while (request.state == PollRequest.QUEUED
+                        && (remaining = request.deadline - System.currentTimeMillis()) > 0) {
+                    request.wait(remaining);
+                }
+                if (request.state == PollRequest.DONE) {
+                    // Late or not: the lease is already live.
+                    message = request.result;
+                    lease = request.lease;
+                } else {
+                    // The owner will never deliver to this request.
+                    request.state = PollRequest.EXPIRED;
+                    message = null;
+                    lease = null;
+                }
+            }
+            // C.5
+            Hooks.get().record("poll.requestToResult", System.nanoTime() - request.createdNanos);
+            if (lease != null) {
+                messageContext.setProperty(SolaceConstants.SOLACE_POLL_MESSAGE, lease);
+            }
+            writeResult(messageContext, message, queueName, responseVariable, overwriteBody, ackMode, lease);
+        } catch (SolaceFault fault) {
+            fault(fault, messageContext, responseVariable);
+        } catch (InterruptedException e) {
+            // D24: the wait on the request is interruptible. The interrupt is the caller's expiry: the request is
+            // marked EXPIRED under its monitor so the owner never delivers to it, and the flag is re asserted.
+            Thread.currentThread().interrupt();
+            if (request != null) {
+                synchronized (request) {
+                    if (request.state == PollRequest.QUEUED) {
+                        request.state = PollRequest.EXPIRED;
+                    }
+                }
+            }
+            fault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR, "interrupted while waiting for the poll flow owner", e,
+                    messageContext);
+        } catch (JCSMPException e) {
+            fault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR, "Solace poll failed: " + e.getMessage(), e, messageContext);
+        } catch (Exception e) {
+            fault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,
+                    "Solace poll operation failed (connection: " + connectionName + ")", e, messageContext);
         }
     }
 
@@ -152,12 +264,18 @@ public class SolacePollMessage extends AbstractConnectorOperation {
      * {@code overwriteBody} behaves identically to other framework operations.
      */
     private void writeResult(MessageContext messageContext, BytesXMLMessage message, String queueName,
-                             String responseVariable, Boolean overwriteBody) {
+                             String responseVariable, Boolean overwriteBody, String ackMode, PollLease lease) {
 
         Map<String, Object> attributes = new HashMap<>();
         attributes.put(SolaceConstants.RESULT_DESTINATION, queueName);
         attributes.put(SolaceConstants.RESULT_RECEIVED, message != null);
         attributes.put(SolaceConstants.RESULT_TIMED_OUT, message == null);
+        if (ackMode != null) {
+            attributes.put("ackMode", ackMode);
+        }
+        if (lease != null) {
+            attributes.put("leaseDeadline", lease.deadline);
+        }
 
         String payloadJson;
 
@@ -216,5 +334,21 @@ public class SolacePollMessage extends AbstractConnectorOperation {
 
         handleConnectorResponse(messageContext, responseVariable, overwriteBody, payloadJson,
                 null, attributes);
+    }
+
+    private void fault(SolaceFault fault, MessageContext messageContext, String responseVariable) {
+        if (fault.outcomeUnknown) {
+            Map<String, Object> attributes = new HashMap<>();
+            attributes.put("outcome", SolaceConstants.OUTCOME_UNKNOWN);
+            handleConnectorResponse(messageContext, responseVariable, false, new JSONObject(attributes).toString(),
+                    null, attributes);
+        }
+        fault(fault.name, fault.code, fault.getMessage(), fault.getCause(), messageContext);
+    }
+
+    private void fault(String name, int code, String message, Throwable cause, MessageContext messageContext) {
+        String text = name + ": " + message;
+        ConnectorUtils.setErrorPropertiesToMessage(messageContext, String.valueOf(code), text);
+        handleException(text, cause instanceof Exception ? (Exception) cause : null, messageContext);
     }
 }

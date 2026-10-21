@@ -20,7 +20,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.wso2.integration.connector</groupId>
     <artifactId>mi-connector-solace</artifactId>
-    <version>1.0.2-SNAPSHOT</version>
+    <version>2.0.0</version>
     <packaging>jar</packaging>
     <name>WSO2 Integration Connector For solace</name>
     <url>http://wso2.org</url>
@@ -31,6 +31,7 @@
         <solace.otel.version>1.2.0</solace.otel.version>
         <synapse.version>4.1.0-wso2v75</synapse.version>
         <connector.core.version>0.9.3</connector.core.version>
+        <config.mapper.version>1.1.0</config.mapper.version>
         <org.wso2.json.version>3.0.0.wso2v8</org.wso2.json.version>
         <maven.test.skip>true</maven.test.skip>
     </properties>
@@ -67,6 +68,12 @@
             <groupId>org.json.wso2</groupId>
             <artifactId>json</artifactId>
             <version>${org.wso2.json.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.wso2.config.mapper</groupId>
+            <artifactId>config-mapper</artifactId>
+            <version>${config.mapper.version}</version>
             <scope>provided</scope>
         </dependency>
     </dependencies>
@@ -219,4 +226,38 @@
             <url>https://maven.wso2.org/nexus/content/repositories/releases/</url>
         </repository>
     </distributionManagement>
+    <profiles>
+        <profile>
+            <id>solace-test-build</id>
+            <activation>
+                <property>
+                    <name>solace.test.build</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>build-helper-maven-plugin</artifactId>
+                        <version>3.4.0</version>
+                        <executions>
+                            <execution>
+                                <id>add-test-build-sources</id>
+                                <phase>generate-sources</phase>
+                                <goals>
+                                    <goal>add-source</goal>
+                                </goals>
+                                <configuration>
+                                    <sources>
+                                        <source>${basedir}/src/test-build/java</source>
+                                    </sources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

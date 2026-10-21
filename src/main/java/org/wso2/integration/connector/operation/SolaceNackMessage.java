@@ -26,12 +26,19 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
 import org.json.JSONObject;
+import org.wso2.integration.connector.SolaceFault;
+import org.wso2.integration.connector.connection.PollLease;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnectorOperation;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
+import org.wso2.integration.connector.settlement.HandleCompletion;
+import org.wso2.integration.connector.settlement.SettlementResult;
 
 import java.util.HashMap;
 import java.util.Map;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_POLL_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POLL_ERROR;
 
 /**
  * Negatively acknowledges a message received by the inbound endpoint.
@@ -47,73 +54,119 @@ import java.util.Map;
  * <b>Important:</b> The inbound endpoint must configure
  * {@code ConsumerFlowProperties.addRequiredSettlementOutcomes(Outcome.FAILED, Outcome.REJECTED)}
  * on its flow receiver for NACK to work. Without this, {@code settle()} will throw.
+ *
+ * <p>In 2.0.0 the default target INBOUND completes the inbound endpoint's settlement handle when one is present,
+ * and falls back to the direct settle above for inbound 1.x. The target POLL settles the message a poll with
+ * ackMode=CLIENT stashed, on its flow owner thread (guide 3.2, design 7.4).</p>
  */
 public class SolaceNackMessage extends AbstractConnectorOperation {
     private static final Log log = LogFactory.getLog(SolaceNackMessage.class);
 
     @Override
     public void execute(MessageContext messageContext, String responseVariable, Boolean overwriteBody) {
-        Object msgObj = messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_MESSAGE);
-        if (msgObj == null) {
-            handleException("No inbound Solace message found in message context, cannot NACK.", messageContext);
-            return;
+        String target = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.TARGET);
+        if (StringUtils.isEmpty(target)) {
+            target = SolaceConstants.TARGET_INBOUND;
         }
-
-        if (!(msgObj instanceof BytesXMLMessage)) {
-            handleException("Invalid Solace message object.", messageContext);
-            return;
-        }
-
-        BytesXMLMessage solaceMessage = (BytesXMLMessage) msgObj;
 
         String outcomeType = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.OUTCOME_TYPE);
         if (StringUtils.isEmpty(outcomeType)) {
             outcomeType = SolaceConstants.OUTCOME_FAILED;
         }
-
-        try {
-            XMLMessage.Outcome outcome;
-            if (SolaceConstants.OUTCOME_REJECTED.equalsIgnoreCase(outcomeType)) {
-                outcome = XMLMessage.Outcome.REJECTED;
-            } else {
-                outcome = XMLMessage.Outcome.FAILED;
-            }
-
-            solaceMessage.settle(outcome);
-            // Tell the inbound listener the message has been settled so it doesn't issue a
-            // second ack/nack post-mediation — the broker treats double-settlement as a
-            // protocol violation and (for FAILED) the conflicting ack disrupts redelivery
-            // counting, causing infinite redelivery.
-            messageContext.setProperty(SolaceConstants.SOLACE_INBOUND_MESSAGE_SETTLED, Boolean.TRUE);
-
-            if (log.isDebugEnabled()) {
-                log.debug("Message negatively acknowledged with outcome " + outcome
-                        + ". AckMessageId: " + solaceMessage.getAckMessageId());
-            }
-
-            JSONObject response = new JSONObject();
-            response.put("settled", true);
-            response.put("outcome", outcome.name());
-            if (solaceMessage.getAckMessageId() != 0) {
-                response.put("ackMessageId", solaceMessage.getAckMessageId());
-            }
-            response.put("settledAt", System.currentTimeMillis());
-
-            Map<String, Object> attributes = new HashMap<>();
-            attributes.put("settled", true);
-            attributes.put("outcome", outcome.name());
-            
-            // Side-effect operation: settle() returns void, so this is a synthesized status
-            // envelope, not broker data. Never overwrite the message body with it — the
-            // original payload must keep flowing downstream. (overwriteBody is hidden in
-            // the UI for this reason.)
-            handleConnectorResponse(messageContext, responseVariable, false,
-                    response.toString(), null, attributes);
-        } catch (JCSMPException e) {
-            handleException("Error settling Solace message with NACK: " + e.getMessage(), e, messageContext);
-        } catch (Exception e) {
-            handleException("Error negatively acknowledging Solace message: " + e.getMessage(), e, messageContext);
+        // The handle value and the broker outcome of the same decision.
+        XMLMessage.Outcome outcome;
+        String handleValue;
+        if (SolaceConstants.OUTCOME_REJECTED.equalsIgnoreCase(outcomeType)) {
+            outcome = XMLMessage.Outcome.REJECTED;
+            handleValue = HandleCompletion.VALUE_REJECTED;
+        } else {
+            outcome = XMLMessage.Outcome.FAILED;
+            handleValue = HandleCompletion.VALUE_FAILED;
         }
+
+        SettlementResult result;
+        if (SolaceConstants.TARGET_POLL.equalsIgnoreCase(target)) {
+            Object stashed = messageContext.getProperty(SolaceConstants.SOLACE_POLL_MESSAGE);
+            if (!(stashed instanceof PollLease)) {
+                fault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,
+                        "no polled Solace message in the message context (target=POLL); poll with ackMode=CLIENT first",
+                        null, messageContext);
+                return;
+            }
+            PollLease lease = (PollLease) stashed;
+            try {
+                // Runs on the flow's owner thread. The caller waits at most OWNER_CALL_TIMEOUT_MS (3.5).
+                result = lease.owner.settle(lease, outcome);
+            } catch (SolaceFault fault) {
+                // POLL_ERROR, UNKNOWN or a JCSMP failure: the stash is kept. A later poll consults the lease's own
+                // state, OUTSTANDING blocks it and SETTLED, EXPIRED or STALE does not.
+                fault(fault, messageContext, responseVariable);
+                return;
+            }
+            // The stash is cleared whenever the operation returns a result, settled or not settled.
+            messageContext.getPropertyKeySet().remove(SolaceConstants.SOLACE_POLL_MESSAGE);
+        } else {
+            result = HandleCompletion.completeInbound(messageContext, handleValue, "nackMessage", log);
+            if (result == null) {
+                // Inbound 1.x: the direct settle, exactly the 1.0.1 lines.
+                Object msgObj = messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_MESSAGE);
+                if (msgObj == null) {
+                    handleException("No inbound Solace message found in message context, cannot NACK.", messageContext);
+                    return;
+                }
+
+                if (!(msgObj instanceof BytesXMLMessage)) {
+                    handleException("Invalid Solace message object.", messageContext);
+                    return;
+                }
+
+                BytesXMLMessage solaceMessage = (BytesXMLMessage) msgObj;
+
+                try {
+                    solaceMessage.settle(outcome);
+                    // Tell the inbound listener the message has been settled so it doesn't issue a
+                    // second ack/nack post-mediation — the broker treats double-settlement as a
+                    // protocol violation and (for FAILED) the conflicting ack disrupts redelivery
+                    // counting, causing infinite redelivery.
+                    messageContext.setProperty(SolaceConstants.SOLACE_INBOUND_MESSAGE_SETTLED, Boolean.TRUE);
+
+                    if (log.isDebugEnabled()) {
+                        log.debug("Message negatively acknowledged with outcome " + outcome
+                                + ". AckMessageId: " + solaceMessage.getAckMessageId());
+                    }
+                    result = SettlementResult.direct(outcome.name(), solaceMessage.getAckMessageId());
+                } catch (JCSMPException e) {
+                    handleException("Error settling Solace message with NACK: " + e.getMessage(), e, messageContext);
+                    return;
+                } catch (Exception e) {
+                    handleException("Error negatively acknowledging Solace message: " + e.getMessage(), e, messageContext);
+                    return;
+                }
+            }
+        }
+
+        // Side-effect operation: settle() returns void, so this is a synthesized status
+        // envelope, not broker data. Never overwrite the message body with it — the
+        // original payload must keep flowing downstream. (overwriteBody is hidden in
+        // the UI for this reason.)
+        handleConnectorResponse(messageContext, responseVariable, false,
+                HandleCompletion.payload(result).toString(), null, HandleCompletion.attributes(result));
+    }
+
+    private void fault(SolaceFault fault, MessageContext messageContext, String responseVariable) {
+        if (fault.outcomeUnknown) {
+            Map<String, Object> attributes = new HashMap<>();
+            attributes.put("outcome", SolaceConstants.OUTCOME_UNKNOWN);
+            handleConnectorResponse(messageContext, responseVariable, false, new JSONObject(attributes).toString(),
+                    null, attributes);
+        }
+        fault(fault.name, fault.code, fault.getMessage(), fault.getCause(), messageContext);
+    }
+
+    private void fault(String name, int code, String message, Throwable cause, MessageContext messageContext) {
+        String text = name + ": " + message;
+        ConnectorUtils.setErrorPropertiesToMessage(messageContext, String.valueOf(code), text);
+        handleException(text, cause instanceof Exception ? (Exception) cause : null, messageContext);
     }
 }

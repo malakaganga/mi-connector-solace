@@ -226,4 +226,85 @@ public final class SolaceConstants {
     public static final String RESULT_RECEIVED = "received";
     public static final String RESULT_DESTINATION = "destination";
     public static final String RESULT_TIMED_OUT = "timedOut";
+
+    // 2.0.0 parameter and property names
+    public static final String TARGET = "target";
+    public static final String TARGET_INBOUND = "INBOUND";
+    public static final String TARGET_POLL = "POLL";
+    public static final String ACK_MODE = "ackMode";
+    public static final String ACK_MODE_AUTO = "AUTO";
+    public static final String ACK_MODE_CLIENT = "CLIENT";
+    public static final String POLL_ACK_TIMEOUT = "pollAckTimeout";
+    public static final String POLL_FLOW_IDLE_TIMEOUT = "pollFlowIdleTimeout";
+    public static final String MAX_POLL_FLOWS = "maxPollFlows";
+    public static final String REQUIRE_SETTLEMENT_OUTCOMES = "requireSettlementOutcomes";
+    public static final String MAX_CONCURRENT_REQUESTS = "maxConcurrentRequests";
+    public static final String RECOVERY_INITIAL_DELAY = "recovery.initialDelay";
+    public static final String RECOVERY_PROGRESSION = "recovery.progression";
+    public static final String RECOVERY_MAX_DELAY = "recovery.maxDelay";
+    public static final String RECOVERY_MAX_ATTEMPTS = "recovery.maxAttempts";
+    public static final String CLIENT_NAME_STRICT = "clientNameStrict";
+    public static final String OAUTH2_TOKEN_FILE = "oauth2TokenFile";
+    public static final String KEEP_ALIVE_INTERVAL = "keepAliveInterval";
+    public static final String KEEP_ALIVE_LIMIT = "keepAliveLimit";
+    public static final String SOLACE_INBOUND_SETTLEMENT = "solace.inbound.settlement";
+    public static final String SOLACE_INBOUND_TX = "solace.inbound.tx";
+    public static final String SOLACE_INBOUND_TX_PRODUCER = "solace.inbound.tx.producer";
+    public static final String SOLACE_POLL_MESSAGE = "solace.poll.message";
+    public static final String MODE_DEFERRED = "DEFERRED";
+    public static final String MODE_DIRECT = "DIRECT";
+    public static final String REASON_ALREADY_DECIDED = "ALREADY_DECIDED";
+    public static final String REASON_LATE = "LATE";
+    public static final String REASON_STALE_DELIVERY = "STALE_DELIVERY";
+    public static final String OUTCOME_UNKNOWN = "UNKNOWN";
+    public static final String REQUIRE_OUTCOMES_AUTO = "AUTO";
+    public static final String REQUIRE_OUTCOMES_TRUE = "TRUE";
+    public static final long DEFAULT_POLL_ACK_TIMEOUT_MS = 180000L;
+    public static final long DEFAULT_POLL_FLOW_IDLE_TIMEOUT_MS = 60000L;
+    public static final int DEFAULT_MAX_POLL_FLOWS = 16;
+    public static final int DEFAULT_MAX_CONCURRENT_REQUESTS = 100;
+    public static final long POLL_SLICE_MS = 1000L;
+    // Bound of a settle or expiry call into a flow owner: one slice plus the settle round trip (G7).
+    public static final long OWNER_CALL_TIMEOUT_MS = 7000L;
+    // Bound of a commit or rollback command wait (G10).
+    public static final long TX_COMPLETION_WAIT_MS = 30000L;
+    // Applied when the init template gives no maxWaitTime (G6).
+    public static final String DEFAULT_POOL_MAX_WAIT_MS = "10000";
+
+    // 2.0.0 fault names, the first token of every fault message (guide 0.3)
+    public static final String FAULT_CONNECTION_ERROR = "CONNECTION_ERROR";
+    public static final String FAULT_PUBLISH_ERROR = "PUBLISH_ERROR";
+    public static final String FAULT_INVALID_CONFIG = "INVALID_CONFIG";
+    public static final String FAULT_REQUEST_REPLY_ERROR = "REQUEST_REPLY_ERROR";
+    public static final String FAULT_ACK_ERROR = "ACK_ERROR";
+    public static final String FAULT_NACK_ERROR = "NACK_ERROR";
+    public static final String FAULT_POLL_ERROR = "POLL_ERROR";
+    public static final String FAULT_TRANSACTION_ACTIVE = "TRANSACTION_ACTIVE";
+    public static final String FAULT_TRANSACTION_COMPLETED = "TRANSACTION_COMPLETED";
+    public static final String FAULT_INBOUND_TRANSACTION = "INBOUND_TRANSACTION";
+    public static final String FAULT_REQUEST_IN_TRANSACTION = "REQUEST_IN_TRANSACTION";
+    public static final String FAULT_POLL_UNSETTLED = "POLL_UNSETTLED";
+    public static final String FAULT_POLL_FLOW_LIMIT = "POLL_FLOW_LIMIT";
+    public static final String FAULT_REQUEST_CONCURRENCY_EXCEEDED = "REQUEST_CONCURRENCY_EXCEEDED";
+    public static final String FAULT_DEADLINE_BEFORE_SEND = "DEADLINE_BEFORE_SEND";
+    public static final String FAULT_DEADLINE = "DEADLINE";
+    public static final String FAULT_EXPIRED = "EXPIRED";
+    public static final String FAULT_UNKNOWN = "UNKNOWN";
+    public static final String FAULT_NACK = "NACK";
+    public static final String FAULT_ROLLED_BACK = "ROLLED_BACK";
+
+    // 2.0.0 error codes (guide 0.3)
+    public static final int ERROR_CODE_TRANSACTION_ACTIVE = 700111;
+    public static final int ERROR_CODE_TRANSACTION_COMPLETED = 700112;
+    public static final int ERROR_CODE_INBOUND_TRANSACTION = 700113;
+    public static final int ERROR_CODE_REQUEST_IN_TRANSACTION = 700114;
+    public static final int ERROR_CODE_POLL_UNSETTLED = 700115;
+    public static final int ERROR_CODE_POLL_FLOW_LIMIT = 700116;
+    public static final int ERROR_CODE_REQUEST_CONCURRENCY_EXCEEDED = 700117;
+    public static final int ERROR_CODE_DEADLINE_BEFORE_SEND = 700118;
+    public static final int ERROR_CODE_DEADLINE = 700119;
+    public static final int ERROR_CODE_EXPIRED = 700120;
+    public static final int ERROR_CODE_UNKNOWN = 700121;
+    public static final int ERROR_CODE_NACK = 700122;
+    public static final int ERROR_CODE_ROLLED_BACK = 700123;
 }

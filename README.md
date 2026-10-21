@@ -9,26 +9,60 @@ All operations are invoked with the `solace.` prefix and act on a configured con
 
 | Operation | Description |
 |---|---|
-| `solace.publishMessage` | Publish a message to a topic or queue. Supports `DIRECT` (topics only), `PERSISTENT`, and `NON_PERSISTENT` delivery, with optional wait-for-ack on guaranteed sends. |
-| `solace.sendRequest` | Send a request message and block until a reply arrives or the timeout expires (synchronous request-reply). |
-| `solace.sendReply` | Send a reply to an inbound request message, using the reply-to destination from the message context. Pairs with `solace.sendRequest`. |
+| `solace.publishMessage` | Publish a message to a topic or queue. Supports `DIRECT` (topics only), `PERSISTENT` and `NON_PERSISTENT` delivery. On guaranteed delivery the operation waits for the broker acknowledgement by default (`waitForAck` true) under the `ackTimeout` deadline (10000 ms). When the deadline cuts the operation off after the send was entered, the fault carries `outcome=UNKNOWN`: the message may or may not have reached the broker, so a retry is at least once. |
+| `solace.sendRequest` | Send a request message and block until a reply arrives or `requestTimeout` expires. A guaranteed request is published on the connection's request reply session with `waitForAck` true and `ackTimeout` 10000 ms by default, and the same `outcome=UNKNOWN` rule applies. |
+| `solace.sendReply` | Send a reply to a request message, using the reply to destination of the message the inbound endpoint stashed (`target=INBOUND`, the default) or of the message a poll with `ackMode=CLIENT` stashed (`target=POLL`). `waitForAck` and `ackTimeout` apply as for `publishMessage`. Pairs with `solace.sendRequest`. |
 
 ### Consuming
 
 | Operation | Description |
 |---|---|
-| `solace.poll` | Synchronously poll a single message from a queue; returns a timed-out result if the queue is empty. Inside a transaction, settlement is deferred to commit/rollback (at-least-once); otherwise the message is acked on receipt (at-most-once). |
+| `solace.poll` | Poll one message from a queue on a cached flow owned by one thread per queue and selector. The result is a timed out envelope when the queue is empty. `ackMode=AUTO` (default) acknowledges the message right after it is handed to the call. `ackMode=CLIENT` stashes the message under `solace.poll.message` with a lease of `pollAckTimeout`, for `acknowledgeMessage` or `nackMessage` with `target=POLL`. Inside a connector owned transaction the message is held until commit or rollback. |
 | `solace.browse` | Browse messages on a queue without consuming them — useful for diagnostics and dead-message-queue inspection. |
-| `solace.acknowledgeMessage` | Acknowledge an inbound message so the broker removes it from the queue. Requires the inbound endpoint configured with `solace.autoAck=false`. |
-| `solace.nackMessage` | Negatively acknowledge an inbound message: `FAILED` redelivers (then DMQ after max-redelivery), `REJECTED` routes straight to the DMQ. |
+| `solace.acknowledgeMessage` | Settle a message ACK. With `target=INBOUND` (default) the decision is handed to inbound endpoint 2.0.0 through its settlement handle (`mode=DEFERRED`) or settled directly with inbound endpoint 1.x (`mode=DIRECT`). With `target=POLL` the lease of the polled message is settled on its flow owner. A second call reports `settled=false` with the reason `ALREADY_DECIDED`, `LATE` or `STALE_DELIVERY`. |
+| `solace.nackMessage` | Settle a message `FAILED` (the broker redelivers it) or `REJECTED` (the broker moves it to the dead message queue), with the same `target` choice and the same reporting. |
 
 ### Transactions
 
 | Operation | Description |
 |---|---|
-| `solace.beginTransaction` | Begin a local transaction; subsequent `publishMessage` / `poll` calls on the same flow are transacted. |
+| `solace.beginTransaction` | Begin a connector owned transaction. It pins one pooled session and gives the transaction its own thread. Every `publishMessage`, `sendReply` and `poll` carrying the transaction runs on that thread. |
 | `solace.commit` | Commit the active transaction. |
 | `solace.rollback` | Roll back the active transaction (polled messages are redelivered). |
+
+## Connection
+
+Each connection name holds one logical connection. It has a pool of sessions for `publishMessage`, `browse` and transactions, plus two dedicated sessions created on first use, one for the `poll` flows and one for request reply. The broker's per client username connection limit must therefore allow the pool size plus two.
+
+Client names are deterministic. A pooled session is named `<clientName>-<node>-<connectionName>-<n>` with a counter per logical connection, and the dedicated sessions end in `-rr` and `-poll`. With `clientNameStrict=true` the first pooled session uses `clientName` as given and the other sessions append their role. A rebuilt session reuses the name of the session it replaces, so the broker evicts the old one. The node is the node id of WSO2 Integrator: MI, read from the `node.id` system property, else the `nodeId` system property or environment variable, else `[cluster_config] node_id` in deployment.toml, else the host name. Two instances on one host need distinct node ids.
+
+A session that failed is rebuilt on its next use with the `recovery.initialDelay`, `recovery.progression`, `recovery.maxDelay` and `recovery.maxAttempts` parameters, within the operation's deadline. A session rebuilt while the broker is unreachable holds the operation for `ackTimeout` at most. The connect attempt itself ends on its own thread at the Solace connect timeout. The pool borrow is bounded by `maxWaitTime` (default 10000 ms) and not by the operation's `ackTimeout`. `ackTimeout` covers the borrow only when `maxWaitTime` is at most `ackTimeout`.
+
+A call that arrives while the dedicated session it needs is being created waits for that creation within its own deadline. It then uses the session, or faults with the creation's failure, or faults with `EXPIRED` when its deadline passes first.
+
+Poll flows are cached per queue and selector, at most `maxPollFlows` per connection (default 16), each with its own owner thread. An idle flow with no outstanding lease is closed after `pollFlowIdleTimeout` (default 60000 ms). When the limit is reached and no flow is idle, `poll` faults with `POLL_FLOW_LIMIT`. A message polled with `ackMode=CLIENT` holds a lease of `pollAckTimeout` (default 180000 ms). When the lease passes unsettled, the connector settles the message `FAILED` and the broker redelivers it. When the broker rebinds a poll flow, the connector closes that flow and the next poll binds a fresh one. A message that was buffered before the rebind is never returned by a poll, the broker redelivers it once.
+
+`requireSettlementOutcomes` controls the negotiation of the `FAILED` and `REJECTED` outcomes on the poll flows. `AUTO` (default) requests the outcomes the broker reports and, for a missing one, retains the message and recycles the flow so the broker redelivers it. `TRUE` fails the flow bind when the broker lacks one.
+
+`maxConcurrentRequests` (default 100) bounds the `sendRequest` calls in flight on the request reply session. A call beyond it waits up to its `requestTimeout` and then faults with `REQUEST_CONCURRENCY_EXCEEDED`. Every session keeps the Solace publisher acknowledgement window of 1 unless the connection sets `pubAckWindowSize`. At window 1 the sends of the request reply session are serialised on the broker acknowledgement, about one round trip per request. A larger window helps only when the request stream keeps the window busy. A sparse stream pays the broker's acknowledgement timer of about one second per confirmation instead. At window 1 the producer lock is held through the confirmation, so a slow request never takes the shared session down.
+
+## Transactions
+
+A connector owned transaction starts with `beginTransaction`, which pins one pooled session and gives the transaction its own thread. Every `publishMessage`, `sendReply` and `poll` inside it is a command on that thread, and the caller waits at most its `ackTimeout` (`pollTimeout` for a poll). `commit` and `rollback` wait at most 30000 ms for the completion, which always runs to its end on the transaction's thread. A transaction that is not completed within `transactionTimeoutMillis` is rolled back by the connector.
+
+An inbound owned transaction is the transacted mode of inbound endpoint 2.0.0 (`solace.transacted=true`). The inbound endpoint commits or rolls back. `publishMessage` and `sendReply` publish on its transacted producer, and `acknowledgeMessage` and `nackMessage` decide the outcome as in every other mode.
+
+| Fault | Code | When |
+|---|---|---|
+| `INBOUND_TRANSACTION` | 700113 | `beginTransaction`, `commit`, `rollback` or `poll` inside an inbound owned transaction. Acknowledge or nack the message instead. |
+| `REQUEST_IN_TRANSACTION` | 700114 | `sendRequest` inside any transaction. A transacted publish is invisible to the responder until the commit, so the reply could never arrive before it. |
+| `TRANSACTION_COMPLETED` | 700112 | An operation submitted to a transaction that has ended, or still queued when it ended. |
+| `ROLLED_BACK` | 700123 | `commit` found that the broker rolled the transaction back. Nothing was committed and the session stays usable. |
+| `UNKNOWN` | 700121 | The outcome is unknown. An operation cut off while its command was running makes the transaction uncertain, so the next `commit` is refused and rolls back. A commit whose result the broker did not confirm, or a rollback that failed, faults `UNKNOWN` and the pinned session is discarded. |
+
+## Compatibility
+
+Connector 2.0.0 works with inbound endpoint 1.x. The operations find no settlement handle on the message context and settle the message directly, which the response reports as `mode=DIRECT`. Inbound endpoint 2.0.0 requires connector 2.0.0 and refuses to start while a 1.x connector is deployed.
 
 ## Prerequisites
 

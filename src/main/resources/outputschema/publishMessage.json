@@ -89,6 +89,10 @@
         "error": {
           "type": "string",
           "description": "Error detail when the publish was not acknowledged. Present only on failure."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "UNKNOWN when the deadline, an interrupt or a transport failure cut the operation off after the send was entered. The message may or may not have reached the broker, so a retry is at least once. Absent otherwise."
         }
       },
       "required": [

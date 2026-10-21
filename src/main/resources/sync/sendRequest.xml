@@ -33,6 +33,8 @@
     <parameter name="dmqEligible" description="Whether the message is eligible for the Dead Message Queue (true/false)."/>
     <parameter name="elidingEligible" description="Whether the message is eligible for eliding (true/false)."/>
     <parameter name="expiration" description="Absolute message expiration time as a UTC epoch in milliseconds (0 means no expiration)."/>
+    <parameter name="waitForAck" description="Whether to wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT request before waiting for the reply. Default: true for PERSISTENT and NON_PERSISTENT. Ignored for DIRECT."/>
+    <parameter name="ackTimeout" description="Deadline in milliseconds for the send and the broker acknowledgement of the request. Default: 10000. The requestTimeout bounds the whole operation."/>
     <parameter name="responseVariable" description="The name of the variable to which the output should be stored."/>
     <parameter name="overwriteBody" description="Replace the Message Body in Message Context with the response."/>
     <sequence>

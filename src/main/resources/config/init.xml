@@ -50,40 +50,26 @@
     <parameter name="oauth2IssuerIdentifier" description="OAuth2 issuer identifier (optional, used when authenticationScheme == OAUTH2)."/>
     <parameter name="oidcIdToken" description="OIDC ID token (optional, used when authenticationScheme == OAUTH2)."/>
     <parameter name="pubAckWindowSize" description="Publisher acknowledgement window size for guaranteed messaging (default: 1)."/>
+    <parameter name="pollAckTimeout" description="Lease in milliseconds of a message polled with ackMode=CLIENT. When it passes without acknowledgeMessage or nackMessage with target=POLL, the connector settles the message FAILED and the broker redelivers it. Default: 180000."/>
+    <parameter name="pollFlowIdleTimeout" description="Time in milliseconds after which an idle poll flow with no outstanding lease is closed. Default: 60000."/>
+    <parameter name="maxPollFlows" description="Number of poll flows cached per connection, one per queue and selector, each with its own owner thread. Beyond it the least recently used idle flow is evicted, and when none is idle the poll faults with POLL_FLOW_LIMIT. Default: 16."/>
+    <parameter name="requireSettlementOutcomes" description="AUTO or TRUE. The poll flows negotiate the settlement outcomes FAILED and REJECTED with the broker. AUTO retains a message that needs a missing outcome and recycles its flow so the broker redelivers it. TRUE fails the bind when the broker lacks one. Default: AUTO."/>
+    <parameter name="maxConcurrentRequests" description="Number of concurrent sendRequest calls on the connection's request reply session. A call beyond it waits up to its requestTimeout and then faults with REQUEST_CONCURRENCY_EXCEEDED. Default: 100."/>
+    <parameter name="recovery.initialDelay" description="First delay in milliseconds before a failed session is rebuilt. Default: 1000."/>
+    <parameter name="recovery.progression" description="Multiplier applied to the delay after each failed rebuild attempt. Default: 2.0."/>
+    <parameter name="recovery.maxDelay" description="Upper bound in milliseconds of the rebuild delay. Default: 60000."/>
+    <parameter name="recovery.maxAttempts" description="Number of rebuild attempts before the operation faults. -1 means unlimited within the operation's deadline. Default: -1."/>
+    <parameter name="clientNameStrict" description="When true the clientName is sent as given to the first pooled session and the other sessions append their role. When false, the default, every session name is the clientName prefix followed by the node id, the connection name and the session's role. Default: false."/>
+    <parameter name="oauth2TokenFile" description="Path of a file holding the OAuth2 access token. The token is read from the file at every connect and reconnect, so a sidecar can rotate it. Requires authenticationScheme=OAUTH2."/>
+    <parameter name="keepAliveInterval" description="Keep alive interval of the JCSMP sessions in milliseconds. Empty leaves the JCSMP default."/>
+    <parameter name="keepAliveLimit" description="Number of missed keep alive responses after which a JCSMP session is considered lost. Empty leaves the JCSMP default."/>
+    <parameter name="maxActiveConnections" description="Maximum number of pooled sessions. Default: 8."/>
+    <parameter name="maxIdleConnections" description="Maximum number of idle pooled sessions kept. Default: 8."/>
+    <parameter name="maxWaitTime" description="Time in milliseconds an operation waits for a pooled session before it faults. Zero or a negative value is replaced by the default, because the pool would wait forever. Default: 10000."/>
+    <parameter name="minEvictionTime" description="Time in milliseconds a pooled session may stay idle before the evictor may close it."/>
+    <parameter name="evictionCheckInterval" description="Interval in milliseconds between runs of the pool evictor. Empty leaves the evictor off."/>
+    <parameter name="exhaustedAction" description="What a borrow does when every pooled session is in use. WHEN_EXHAUSTED_BLOCK waits up to maxWaitTime, WHEN_EXHAUSTED_FAIL faults at once, WHEN_EXHAUSTED_GROW creates one more session. Default: WHEN_EXHAUSTED_BLOCK."/>
     <sequence>
-      <property expression="$func:name" name="name"/>
-      <property expression="$func:host" name="host"/>
-      <property expression="$func:vpnName" name="vpnName"/>
-      <property expression="$func:username" name="username"/>
-      <property expression="$func:apiProvidedUsername" name="apiProvidedUsername"/>
-      <property expression="$func:password" name="password"/>
-      <property expression="$func:clientName" name="clientName"/>
-      <property expression="$func:connectionTimeout" name="connectionTimeout"/>
-      <property expression="$func:readTimeout" name="readTimeout"/>
-      <property expression="$func:compressionLevel" name="compressionLevel"/>
-      <property expression="$func:generateSendTimestamps" name="generateSendTimestamps"/>
-      <property expression="$func:generateReceiveTimestamps" name="generateReceiveTimestamps"/>
-      <property expression="$func:generateSequenceNumbers" name="generateSequenceNumbers"/>
-      <property expression="$func:calculateMessageExpiration" name="calculateMessageExpiration"/>
-      <property expression="$func:connectRetries" name="connectRetries"/>
-      <property expression="$func:connectRetriesPerHost" name="connectRetriesPerHost"/>
-      <property expression="$func:reconnectRetries" name="reconnectRetries"/>
-      <property expression="$func:reconnectRetryWait" name="reconnectRetryWait"/>
-      <property expression="$func:sslTrustStorePath" name="sslTrustStorePath"/>
-      <property expression="$func:sslTrustStorePassword" name="sslTrustStorePassword"/>
-      <property expression="$func:sslTrustStoreFormat" name="sslTrustStoreFormat"/>
-      <property expression="$func:sslKeyStorePath" name="sslKeyStorePath"/>
-      <property expression="$func:sslKeyStorePassword" name="sslKeyStorePassword"/>
-      <property expression="$func:sslKeyStoreFormat" name="sslKeyStoreFormat"/>
-      <property expression="$func:sslKeyPassword" name="sslKeyPassword"/>
-      <property expression="$func:sslValidateCertificate" name="sslValidateCertificate"/>
-      <property expression="$func:sslValidateCertificateDate" name="sslValidateCertificateDate"/>
-      <property expression="$func:sslValidateHostname" name="sslValidateHostname"/>
-      <property expression="$func:authenticationScheme" name="authenticationScheme"/>
-      <property expression="$func:oauth2AccessToken" name="oauth2AccessToken"/>
-      <property expression="$func:oauth2IssuerIdentifier" name="oauth2IssuerIdentifier"/>
-      <property expression="$func:oidcIdToken" name="oidcIdToken"/>
-      <property expression="$func:pubAckWindowSize" name="pubAckWindowSize"/>
       <class name="org.wso2.integration.connector.connection.SolaceConfigConnector"/>
     </sequence>
 </template>

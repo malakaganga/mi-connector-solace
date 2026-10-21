@@ -61,6 +61,10 @@
         "correlationId": {
           "type": "string",
           "description": "The correlation id carried over from the inbound request message. Present only when the request carried a correlation id."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "UNKNOWN when the deadline, an interrupt or a transport failure cut the operation off after the send was entered. The reply may or may not have reached the broker, so a retry is at least once. Absent otherwise."
         }
       },
       "required": [

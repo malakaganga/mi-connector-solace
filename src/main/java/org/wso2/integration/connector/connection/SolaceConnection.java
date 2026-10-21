@@ -18,17 +18,14 @@
 
 package org.wso2.integration.connector.connection;
 
-import com.solace.messaging.trace.propagation.SolaceJCSMPTextMapSetter;
 import com.solacesystems.jcsmp.Browser;
 import com.solacesystems.jcsmp.BrowserProperties;
-import com.solacesystems.jcsmp.BytesMessage;
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.CacheLiveDataAction;
 import com.solacesystems.jcsmp.CacheRequestResult;
 import com.solacesystems.jcsmp.CacheSession;
 import com.solacesystems.jcsmp.CacheSessionProperties;
 import com.solacesystems.jcsmp.ConsumerFlowProperties;
-import com.solacesystems.jcsmp.DeliveryMode;
 import com.solacesystems.jcsmp.Destination;
 import com.solacesystems.jcsmp.EndpointProperties;
 import com.solacesystems.jcsmp.FlowReceiver;
@@ -36,44 +33,44 @@ import com.solacesystems.jcsmp.JCSMPErrorResponseException;
 import com.solacesystems.jcsmp.JCSMPErrorResponseSubcodeEx;
 import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.JCSMPFactory;
-import com.solacesystems.jcsmp.JCSMPRequestTimeoutException;
 import com.solacesystems.jcsmp.JCSMPSession;
-import com.solacesystems.jcsmp.JCSMPStreamingPublishCorrelatingEventHandler;
-import com.solacesystems.jcsmp.JCSMPTransportException;
 import com.solacesystems.jcsmp.ProducerFlowProperties;
 import com.solacesystems.jcsmp.Queue;
-import com.solacesystems.jcsmp.Requestor;
-import com.solacesystems.jcsmp.SDTException;
-import com.solacesystems.jcsmp.SDTMap;
-import com.solacesystems.jcsmp.TextMessage;
 import com.solacesystems.jcsmp.Topic;
-import com.solacesystems.jcsmp.XMLContentMessage;
 import com.solacesystems.jcsmp.XMLMessageConsumer;
+import com.solacesystems.jcsmp.XMLMessageListener;
 import com.solacesystems.jcsmp.XMLMessageProducer;
 import com.solacesystems.jcsmp.transaction.TransactedSession;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
-import org.apache.synapse.aspects.flow.statistics.collectors.RuntimeStatisticCollector;
-import org.apache.synapse.aspects.flow.statistics.tracing.opentelemetry.management.handling.span.SpanHandler;
+import org.wso2.integration.connector.SolaceFault;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.ConnectException;
 import org.wso2.integration.connector.core.connection.Connection;
 import org.wso2.integration.connector.core.connection.ConnectionConfig;
+import org.wso2.integration.connector.core.connection.ConnectionHandler;
+import org.wso2.integration.connector.hooks.Hooks;
 import org.wso2.integration.connector.models.PublishResult;
 import org.wso2.integration.connector.models.SolaceMessageProperties;
+import org.wso2.integration.connector.utils.Backoff;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.CONNECTOR_NAME;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_EXPIRED;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_TRANSACTION_ACTIVE;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_EXPIRED;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_TRANSACTION_ACTIVE;
 
 /**
  * Manages a connection to the Solace event broker.
@@ -83,16 +80,23 @@ public class SolaceConnection implements Connection {
 
     private static final Log log = LogFactory.getLog(SolaceConnection.class);
 
-    /**
-     * Writes W3C trace context into a JCSMP message.
-     */
-    private static final SolaceJCSMPTextMapSetter TRACE_CONTEXT_SETTER = new SolaceJCSMPTextMapSetter();
-
-    private JCSMPSession session;
-    private XMLMessageProducer producer;
+    final SolaceLogicalConnection lc;
+    // From lc.pooledIndex, fixed for the object's life. The rebuilt session reuses the name with this index.
+    final int index;
+    // The log identity, name and index.
+    final String connectionId;
+    public volatile JCSMPSession session;
+    volatile XMLMessageProducer producer;
+    volatile int generation = 0;
+    public volatile boolean failed = false;
+    // The handler of the current session, with the reconnect guard registered at connect (A45).
+    private volatile PooledSessionEventHandler handler;
+    // 3.4: the producer lock, the pending acknowledgements and the send algorithm. Rebuilt with the session.
+    public final SessionPublisher publisher;
+    // The one cleanup claim (orphan()).
+    private final AtomicBoolean orphaned = new AtomicBoolean();
     private XMLMessageConsumer consumer;
     private final Object consumerLock = new Object();
-    private final String connectionId;
     private TransactedSession txSession;
     private XMLMessageProducer txProducer;
     /**
@@ -107,466 +111,12 @@ public class SolaceConnection implements Connection {
     private final Map<String, TxFlowEntry> txFlowReceivers = new ConcurrentHashMap<>();
     private final Object txLock = new Object();
 
-    /**
-     * Tracks in-flight guaranteed publishes when the caller asked to block for the broker ACK.
-     * Keyed by correlation key. The {@link PublishEventHandler} completes the future on ack or
-     * error; the calling thread then unblocks from {@link #publish}.
-     */
-    private final ConcurrentMap<String, CompletableFuture<Void>> pendingAcks = new ConcurrentHashMap<>();
-
-    /**
-     * Creates a new SolaceConnection with a pre-built JCSMPSession.
-     *
-     * @param session      the JCSMP session
-     * @param connectionId a unique identifier for this connection
-     * @throws JCSMPException if creating the producer fails
-     */
-    public SolaceConnection(JCSMPSession session, String connectionId) throws JCSMPException {
-        this.session = session;
-        this.connectionId = connectionId;
-        this.producer = session.getMessageProducer(new PublishEventHandler());
-        // The session consumer is created lazily (see ensureConsumer): 
-        // Only operations that receive on the session ( requestCachedMessages and DIRECT sendRequest) create consumer.
-        log.info("Solace connection created: " + connectionId);
-    }
-
-    /**
-     * Publishes a message to the specified destination. When {@code waitForAck} is true
-     * and the delivery mode is guaranteed (PERSISTENT / NON_PERSISTENT), blocks until
-     * the broker ACKs the message or the ACK times out — so the caller knows the broker
-     * accepted the message before the mediation continues. DIRECT deliveries never
-     * produce ACKs, so {@code waitForAck} has no effect for them.
-     *
-     * @param destinationType  TOPIC or QUEUE
-     * @param destinationName  the name of the topic or queue
-     * @param payload          the message payload as a string
-     * @param deliveryMode     DIRECT, PERSISTENT, or NON_PERSISTENT
-     * @param messageType      message type: TEXT, BYTES, or XML (default: TEXT; JSON travels as TEXT)
-     * @param properties       additional message properties (may be null)
-     * @param waitForAck       if true and delivery is guaranteed, block for broker ACK
-     * @param ackTimeoutMillis maximum time to wait for the broker ACK (ignored when waitForAck=false)
-     * @param synCtx           mediation context of the caller, used to propagate the trace context
-     * @throws JCSMPException if publishing fails, the broker NACKs, or the ACK wait times out
-     */
-    public PublishResult publish(String destinationType, String destinationName, String payload,
-                                 String deliveryMode, String messageType, SolaceMessageProperties properties,
-                                 boolean waitForAck, long ackTimeoutMillis, MessageContext synCtx)
-            throws JCSMPException {
-        return publish(destinationType, destinationName, payload, deliveryMode, messageType, properties,
-                waitForAck, ackTimeoutMillis, null, synCtx);
-    }
-
-    public PublishResult publish(String destinationType, String destinationName, String payload,
-                                 String deliveryMode, String messageType, SolaceMessageProperties properties,
-                                 boolean waitForAck, long ackTimeoutMillis, String httpContentType,
-                                 MessageContext synCtx)
-            throws JCSMPException {
-
-        // Check whether multiple calls cause error or handled internally
-        Destination destination = resolveDestination(destinationType, destinationName);
-
-        BytesXMLMessage message = createMessage(messageType, payload, synCtx);
-        if (httpContentType != null && !httpContentType.isEmpty()) {
-            message.setHTTPContentType(httpContentType);
-        }
-
-        // Set delivery mode
-        if (deliveryMode != null) {
-            switch (deliveryMode.toUpperCase()) {
-                case SolaceConstants.DELIVERY_MODE_PERSISTENT:
-                    message.setDeliveryMode(DeliveryMode.PERSISTENT);
-                    break;
-                case SolaceConstants.DELIVERY_MODE_NON_PERSISTENT:
-                    message.setDeliveryMode(DeliveryMode.NON_PERSISTENT);
-                    break;
-                case SolaceConstants.DELIVERY_MODE_DIRECT:
-                default:
-                    message.setDeliveryMode(DeliveryMode.DIRECT);
-                    break;
-            }
-        }
-
-        applyMessageProperties(message, properties);
-
-        // Set correlation key for guaranteed delivery tracking
-        boolean guaranteed = message.getDeliveryMode() != DeliveryMode.DIRECT;
-        String correlationKey = null;
-        CompletableFuture<Void> ackFuture = null;
-        if (guaranteed) {
-            correlationKey = destinationName + "-" + UUID.randomUUID();
-            message.setCorrelationKey(correlationKey);
-            if (waitForAck) {
-                ackFuture = new CompletableFuture<>();
-                pendingAcks.put(correlationKey, ackFuture);
-            }
-        }
-
-        try {
-            producer.send(message, destination);
-        } catch (JCSMPException e) {
-            if (correlationKey != null) {
-                pendingAcks.remove(correlationKey);
-            }
-            throw e;
-        }
-
-        // Transport succeeded. Beyond this point we only distinguish ACK outcomes,
-        // returning them as PublishResult so the caller can decide how to react.
-        if (ackFuture != null) {
-            try {
-                ackFuture.get(ackTimeoutMillis, TimeUnit.MILLISECONDS);
-                if (log.isDebugEnabled()) {
-                    log.debug("Message published to " + destinationType + " '" + destinationName
-                            + "' (ACK received, correlationKey=" + correlationKey + ")");
-                }
-                return new PublishResult(SolaceConstants.ACK_STATUS_ACK, true, correlationKey, null);
-            } catch (TimeoutException e) {
-                String msg = "Publish ACK timeout after " + ackTimeoutMillis + "ms";
-                return new PublishResult(SolaceConstants.ACK_STATUS_TIMEOUT, false, correlationKey, msg);
-            } catch (ExecutionException e) {
-                Throwable cause = e.getCause();
-                String msg = cause != null ? cause.getMessage() : "Broker NACK";
-                return new PublishResult(SolaceConstants.ACK_STATUS_NACK, false, correlationKey, msg);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return new PublishResult(SolaceConstants.ACK_STATUS_NACK, false, correlationKey,
-                        "Interrupted while waiting for publish ACK");
-            } finally {
-                // Single cleanup point for the tracking entry, whatever the outcome. On ACK/NACK
-                // the event handler already removed it before completing the future; on
-                // timeout/interrupt no callback fired, so this is where it's removed. remove()
-                // on an already-absent key is a harmless no-op.
-                pendingAcks.remove(correlationKey);
-            }
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("Message published to " + destinationType + " '" + destinationName + "'");
-        }
-        String status = guaranteed ? SolaceConstants.ACK_STATUS_NOT_REQUESTED
-                : SolaceConstants.ACK_STATUS_NOT_APPLICABLE;
-        return new PublishResult(status, false, correlationKey, null);
-    }
-
-    /**
-     * Sends a reply to the original inbound request message using JCSMP's native sendReply API.
-     * The reply-to destination is derived from the original request. Correlation ID and
-     * application message ID are echoed from the request when the caller has not supplied
-     * explicit values via {@code properties}.
-     *
-     * @param inboundMessage the original request message received by the inbound endpoint
-     * @param payload        the reply payload
-     * @param deliveryMode   DIRECT, PERSISTENT, or NON_PERSISTENT (default: DIRECT)
-     * @param messageType    message type: TEXT, BYTES, or XML (default: TEXT; JSON travels as TEXT)
-     * @param properties     additional reply message properties (may be null)
-     * @param synCtx         mediation context of the caller, used to propagate the trace context
-     * @throws JCSMPException if publishing fails
-     */
-    public void sendReply(BytesXMLMessage inboundMessage, String payload, String deliveryMode,
-                          String messageType, SolaceMessageProperties properties,
-                          MessageContext synCtx) throws JCSMPException {
-        sendReply(inboundMessage, payload, deliveryMode, messageType, properties, null, synCtx);
-    }
-
-    public void sendReply(BytesXMLMessage inboundMessage, String payload, String deliveryMode,
-                          String messageType, SolaceMessageProperties properties,
-                          String httpContentType, MessageContext synCtx) throws JCSMPException {
-
-        BytesXMLMessage replyMessage = createMessage(messageType, payload, synCtx);
-        if (httpContentType != null && !httpContentType.isEmpty()) {
-            replyMessage.setHTTPContentType(httpContentType);
-        }
-
-        if (deliveryMode != null) {
-            switch (deliveryMode.toUpperCase()) {
-                case SolaceConstants.DELIVERY_MODE_PERSISTENT:
-                    replyMessage.setDeliveryMode(DeliveryMode.PERSISTENT);
-                    break;
-                case SolaceConstants.DELIVERY_MODE_NON_PERSISTENT:
-                    replyMessage.setDeliveryMode(DeliveryMode.NON_PERSISTENT);
-                    break;
-                case SolaceConstants.DELIVERY_MODE_DIRECT:
-                default:
-                    replyMessage.setDeliveryMode(DeliveryMode.DIRECT);
-                    break;
-            }
-        } else {
-            replyMessage.setDeliveryMode(DeliveryMode.DIRECT);
-        }
-
-        // Echo correlationId and applicationMessageId from the request if the caller
-        // didn't explicitly supply them — matches the JCSMP request-reply convention.
-        if (properties == null || properties.getCorrelationId() == null) {
-            if (inboundMessage.getCorrelationId() != null) {
-                replyMessage.setCorrelationId(inboundMessage.getCorrelationId());
-            }
-        }
-        if (properties == null || properties.getApplicationMessageId() == null) {
-            if (inboundMessage.getApplicationMessageId() != null) {
-                replyMessage.setApplicationMessageId(inboundMessage.getApplicationMessageId());
-            }
-        }
-
-        applyMessageProperties(replyMessage, properties);
-
-        // Set correlation key for guaranteed delivery tracking
-        if (replyMessage.getDeliveryMode() != DeliveryMode.DIRECT) {
-            String correlationKey = "reply-" + UUID.randomUUID();
-            replyMessage.setCorrelationKey(correlationKey);
-        }
-
-        producer.sendReply(inboundMessage, replyMessage);
-        if (log.isDebugEnabled()) {
-            log.debug("Reply sent to " + inboundMessage.getReplyTo());
-        }
-    }
-
-    /**
-     * Performs a synchronous request-reply. For DIRECT delivery, uses the JCSMP
-     * {@link Requestor} API. For guaranteed (PERSISTENT/NON_PERSISTENT) delivery,
-     * provisions a temporary queue, sets it as the reply-to destination, and waits
-     * for a reply via a {@link FlowReceiver} — this is the only JCSMP-supported
-     * pattern for guaranteed request-reply.
-     *
-     * @param destinationType TOPIC or QUEUE
-     * @param destinationName destination name
-     * @param payload         request payload
-     * @param deliveryMode    DIRECT, PERSISTENT, or NON_PERSISTENT
-     * @param messageType     message type: TEXT, BYTES, or XML (JSON travels as TEXT)
-     * @param properties      optional request message properties (may be null)
-     * @param timeoutMillis   maximum time to wait for a reply
-     * @param synCtx          mediation context of the caller, used to propagate the trace context
-     * @return the reply message
-     * @throws JCSMPRequestTimeoutException if no reply arrives within the timeout
-     * @throws JCSMPException               if the request cannot be sent or flow setup fails
-     */
-    public BytesXMLMessage sendRequest(String destinationType, String destinationName, String payload,
-                                       String deliveryMode, String messageType,
-                                       SolaceMessageProperties properties, long timeoutMillis, MessageContext synCtx)
-            throws JCSMPException {
-        return sendRequest(destinationType, destinationName, payload, deliveryMode, messageType,
-                properties, timeoutMillis, null, synCtx);
-    }
-
-    public BytesXMLMessage sendRequest(String destinationType, String destinationName, String payload,
-                                       String deliveryMode, String messageType,
-                                       SolaceMessageProperties properties, long timeoutMillis,
-                                       String httpContentType, MessageContext synCtx)
-            throws JCSMPException {
-
-        Destination destination = resolveDestination(destinationType, destinationName);
-        DeliveryMode resolvedMode = resolveDeliveryMode(deliveryMode);
-
-        BytesXMLMessage requestMessage = createMessage(messageType, payload, synCtx);
-        if (httpContentType != null && !httpContentType.isEmpty()) {
-            requestMessage.setHTTPContentType(httpContentType);
-        }
-        requestMessage.setDeliveryMode(resolvedMode);
-        applyMessageProperties(requestMessage, properties);
-
-        if (resolvedMode == DeliveryMode.DIRECT) {
-            // DIRECT: JCSMP Requestor handles reply-to temp topic + blocking receive.
-            // The Requestor needs the session consumer started to receive the reply
-            // This matches replies by correlation ID
-            ensureConsumer();
-            Requestor requestor = session.createRequestor();
-            return requestor.request(requestMessage, timeoutMillis, destination);
-        }
-
-        // Guaranteed request-reply: temp queue + FlowReceiver
-        return sendGuaranteedRequest(requestMessage, destination, destinationName, timeoutMillis);
-    }
-
-    /**
-     * Executes a guaranteed request-reply using a temporary queue.
-     * The temp queue is provisioned, attached as the reply-to destination, and drained
-     * by a short-lived FlowReceiver. Resources are released in the finally block to avoid
-     * leaking flows or temp endpoints on errors.
-     *
-     * <p>A correlation ID is set on the request (generated if the caller didn't supply one)
-     * and verified against the reply. If the reply's correlation ID doesn't match — which
-     * shouldn't happen on a fresh temp queue but is defensive — a warning is logged.</p>
-     */
-    private BytesXMLMessage sendGuaranteedRequest(BytesXMLMessage requestMessage, Destination destination,
-                                                  String destinationName, long timeoutMillis)
-            throws JCSMPException {
-
-        Queue tempQueue = session.createTemporaryQueue();
-        requestMessage.setReplyTo(tempQueue);
-
-        // Ensure the request carries a correlation ID we can verify against the reply.
-        // If the caller already set one via properties, use it; otherwise generate one.
-        String expectedCorrelationId = requestMessage.getCorrelationId();
-        if (expectedCorrelationId == null) {
-            expectedCorrelationId = "req-" + UUID.randomUUID();
-            requestMessage.setCorrelationId(expectedCorrelationId);
-        }
-
-        // Set correlation key for guaranteed publish-ACK tracking
-        String correlationKey = destinationName + "-req-" + UUID.randomUUID();
-        requestMessage.setCorrelationKey(correlationKey);
-
-        ConsumerFlowProperties flowProps = new ConsumerFlowProperties();
-        flowProps.setEndpoint(tempQueue);
-        flowProps.setStartState(true);
-
-        FlowReceiver flowReceiver = null;
-        try {
-            flowReceiver = session.createFlow(null, flowProps);
-
-            producer.send(requestMessage, destination);
-
-            // Block until a reply arrives or the timeout expires
-            BytesXMLMessage reply = flowReceiver.receive((int) timeoutMillis);
-            if (reply == null) {
-                throw new JCSMPRequestTimeoutException("No reply received within " + timeoutMillis + "ms");
-            }
-
-            // Verify the reply corresponds to our request. A mismatch is unlikely on a fresh
-            // temp queue, but defensive logging makes cross-wiring easier to diagnose.
-            String replyCorrelationId = reply.getCorrelationId();
-            if (replyCorrelationId != null && !expectedCorrelationId.equals(replyCorrelationId)) {
-                log.warn("Guaranteed request-reply correlation mismatch: expected='"
-                        + expectedCorrelationId + "', received='" + replyCorrelationId
-                        + "'. Returning the message regardless.");
-            }
-
-            // Acknowledge so the broker can remove it from the temp queue
-            reply.ackMessage();
-            return reply;
-        } finally {
-            if (flowReceiver != null) {
-                flowReceiver.close();
-            }
-            // Temp queue is auto-cleaned when the session closes; no explicit deprovision needed.
-        }
-    }
-
-    /**
-     * Resolves a delivery mode string into the JCSMP enum. Null or unknown falls back to DIRECT.
-     */
-    private DeliveryMode resolveDeliveryMode(String deliveryMode) {
-        if (deliveryMode == null) {
-            return DeliveryMode.DIRECT;
-        }
-        switch (deliveryMode.toUpperCase()) {
-            case SolaceConstants.DELIVERY_MODE_PERSISTENT:
-                return DeliveryMode.PERSISTENT;
-            case SolaceConstants.DELIVERY_MODE_NON_PERSISTENT:
-                return DeliveryMode.NON_PERSISTENT;
-            case SolaceConstants.DELIVERY_MODE_DIRECT:
-            default:
-                return DeliveryMode.DIRECT;
-        }
-    }
-
-    /**
-     * Creates a message of the specified type with the given payload. Supports TEXT, BYTES, and XML.
-     * JSON payloads are carried as TEXT on the wire (Solace has no JSON message type); callers are
-     * expected to pass messageType=TEXT for JSON content.
-     *
-     * @param messageType message type: TEXT, BYTES, or XML (default: TEXT)
-     * @param payload     the message payload
-     * @param synCtx      mediation context of the caller, used to propagate the trace context
-     * @return the created message, carrying the trace context when tracing is enabled
-     */
-    private BytesXMLMessage createMessage(String messageType, String payload, MessageContext synCtx) {
-        if (messageType == null) {
-            messageType = SolaceConstants.MESSAGE_TYPE_TEXT;
-        }
-        BytesXMLMessage message;
-        switch (messageType.toUpperCase()) {
-            case SolaceConstants.MESSAGE_TYPE_BYTES:
-                BytesMessage bytesMsg = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
-                bytesMsg.setData(payload != null ? payload.getBytes() : new byte[0]);
-                message = bytesMsg;
-                break;
-            case SolaceConstants.MESSAGE_TYPE_XML:
-                XMLContentMessage xmlMsg = JCSMPFactory.onlyInstance().createMessage(XMLContentMessage.class);
-                if (payload != null) {
-                    xmlMsg.setXMLContent(payload);
-                }
-                message = xmlMsg;
-                break;
-            case SolaceConstants.MESSAGE_TYPE_TEXT:
-            default:
-                TextMessage textMsg = JCSMPFactory.onlyInstance().createMessage(TextMessage.class);
-                textMsg.setText(payload);
-                message = textMsg;
-        }
-        if (RuntimeStatisticCollector.isOpenTelemetryEnabled()) {
-            try {
-                SpanHandler.injectTraceContext(synCtx, message, TRACE_CONTEXT_SETTER);
-            } catch (NoSuchMethodError e) {
-                log.warn("You are running solace connector on old wso2mi version. " +
-                        "Distributed tracing will not working correctly in this version. " +
-                        "Please upgrade the wso2mi version");
-            }
-        }
-        return message;
-    }
-
-    /**
-     * Applies optional SolaceMessageProperties to a message.
-     */
-    private void applyMessageProperties(BytesXMLMessage message, SolaceMessageProperties properties) {
-        if (properties == null) {
-            return;
-        }
-        if (properties.getCorrelationId() != null) {
-            message.setCorrelationId(properties.getCorrelationId());
-        }
-        if (properties.getPriority() != null) {
-            message.setPriority(properties.getPriority());
-        }
-        if (properties.getTimeToLive() != null) {
-            message.setTimeToLive(properties.getTimeToLive());
-        }
-        if (properties.getApplicationMessageId() != null) {
-            message.setApplicationMessageId(properties.getApplicationMessageId());
-        }
-        if (properties.getApplicationMessageType() != null) {
-            message.setApplicationMessageType(properties.getApplicationMessageType());
-        }
-        if (properties.getSenderId() != null) {
-            message.setSenderId(properties.getSenderId());
-        }
-        if (properties.getDmqEligible() != null) {
-            message.setDMQEligible(properties.getDmqEligible());
-        }
-        if (properties.getElidingEligible() != null) {
-            message.setElidingEligible(properties.getElidingEligible());
-        }
-        if (properties.getExpiration() != null) {
-            message.setExpiration(properties.getExpiration());
-        }
-        if (properties.getReplyToDestinationType() != null && properties.getReplyToDestinationName() != null) {
-            Destination replyTo = resolveDestination(properties.getReplyToDestinationType(),
-                    properties.getReplyToDestinationName());
-            message.setReplyTo(replyTo);
-        }
-        // Set user properties (custom key-value pairs)
-        if (properties.getUserProperties() != null && !properties.getUserProperties().isEmpty()) {
-            try {
-                SDTMap userPropsMap = JCSMPFactory.onlyInstance().createMap();
-                for (Map.Entry<String, String> entry : properties.getUserProperties().entrySet()) {
-                    userPropsMap.putString(entry.getKey(), entry.getValue());
-                }
-                message.setProperties(userPropsMap);
-            } catch (SDTException e) {
-                log.error("Error setting user properties on message", e);
-            }
-        }
-    }
-
-    /**
-     * Resolves a destination (topic or queue) from type and name.
-     */
-    private Destination resolveDestination(String type, String name) {
-        if (SolaceConstants.DESTINATION_TYPE_QUEUE.equalsIgnoreCase(type)) {
-            return JCSMPFactory.onlyInstance().createQueue(name);
-        }
-        return JCSMPFactory.onlyInstance().createTopic(name);
+    /** The pooled holder, unconnected. The first ensureSession of a borrowing operation connects it. */
+    public SolaceConnection(SolaceLogicalConnection lc, int index) {
+        this.lc = lc;
+        this.index = index;
+        this.connectionId = lc.name + "-" + index;
+        this.publisher = new SessionPublisher(lc, connectionId);
     }
 
     /**
@@ -593,7 +143,197 @@ public class SolaceConnection implements Connection {
      * @return true if the session is not closed
      */
     public boolean isConnected() {
-        return session != null && !session.isClosed();
+        return session != null && !session.isClosed() && !failed;
+    }
+
+    /**
+     * Design 7.10 ensureSession(), the first call of every operation on a pooled connection after the borrow.
+     * The operation's own record stays attached: the send that follows refuses an expired record and the
+     * operation's finally discards the session (3.4).
+     */
+    public void ensureSession(PublishOperation op) throws SolaceFault {
+        ensureSession(op, op.deadline, false);
+    }
+
+    /**
+     * For callers without a record of their own. The attempt record keeps the caller's absolute deadline, so the
+     * watchdog closes the attached candidate at the deadline exactly as on the publish path. The record is
+     * finished before the caller touches the session, so it never governs the session afterwards.
+     */
+    public void ensureSession(long deadlineMillis) throws SolaceFault {
+        PublishOperation attempt = PublishOperation.registerUntil(lc, deadlineMillis);
+        try {
+            // true: the record hands the session over at publication through the atomic transfer decision.
+            ensureSession(attempt, deadlineMillis, true);
+        } finally {
+            attempt.finish();
+        }
+    }
+
+    private void ensureSession(PublishOperation op, long deadlineMillis, boolean transferAtPublication)
+            throws SolaceFault {
+        // Before the healthy return: a closed logical connection serves nothing.
+        if (lc.closed) {
+            throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                    "Solace connection '" + lc.name + "' is closed");
+        }
+        // Before the healthy return too: a spent budget never returns a session. Nothing was sent.
+        if (op.isExpired() || System.currentTimeMillis() >= deadlineMillis) {
+            throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                    "the operation's deadline passed before the session was checked", null, false);
+        }
+        JCSMPSession current = session;
+        if (current != null && !current.isClosed() && !failed) {
+            return;
+        }
+        if (hasActiveTransaction()) {
+            throw new SolaceFault(FAULT_TRANSACTION_ACTIVE, ERROR_CODE_TRANSACTION_ACTIVE,
+                    "connection " + connectionId + " owns an active transaction and its session cannot be rebuilt");
+        }
+        int attempt = 1;
+        while (true) {
+            // Terminal: a closed logical connection never reopens. Tested before every attempt.
+            if (lc.closed) {
+                throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                        "Solace connection '" + lc.name + "' is closed");
+            }
+            // An already spent budget never starts an attempt. Nothing was sent.
+            if (op.isExpired() || System.currentTimeMillis() >= deadlineMillis) {
+                throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                        "session " + connectionId + " could not be rebuilt within the operation's deadline", null, false);
+            }
+            try {
+                // Not connected yet. The same client name as the predecessor, so the broker evicts the zombie.
+                PooledSessionEventHandler candidateHandler = new PooledSessionEventHandler(this);
+                JCSMPSession candidate = lc.createSession(String.valueOf(index), candidateHandler);
+                candidateHandler.bind(candidate);
+                // Attached before connect, so an expiry during the connect closes exactly this session.
+                if (!op.attachSession(candidate)) {
+                    lc.closeOnCloser(candidate);
+                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                            "operation expired during the session rebuild", null, false);
+                }
+                // The stage tells the watchdog the candidate is in use: from here an expiry closes it (A51).
+                if (!op.enterStage(PublishOperation.Stage.CONNECTING)) {
+                    lc.closeOnCloser(candidate);
+                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                            "operation expired during the session rebuild", null, false);
+                }
+                // The connect runs on a connect thread and this thread waits under the record's remaining budget.
+                // A SolaceFault from it is thrown through, nothing was sent (A52).
+                lc.connectSession(candidate, candidateHandler, op);
+                XMLMessageProducer candidateProducer;
+                try {
+                    candidateProducer = candidate.getMessageProducer(publisher.eventHandler());
+                } catch (JCSMPException e) {
+                    // The creation obligation lasts through producer creation.
+                    lc.closeOnCloser(candidate);
+                    throw e;
+                }
+                if (transferAtPublication) {
+                    // The transfer decision (3.4), atomic with expire() and with the deadline under the record's
+                    // monitor. Refused means the candidate is with the closer and is never published.
+                    if (!op.transferSession()) {
+                        throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                                "session " + connectionId + " connected after the operation's deadline", null, false);
+                    }
+                } else if (op.expiredWith(candidate)) {
+                    // The publish path keeps the record attached. This early refusal only avoids publishing a
+                    // session the watchdog is already closing.
+                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                            "session " + connectionId + " connected after the operation's deadline", null, false);
+                }
+                JCSMPSession old = session;
+                session = candidate;
+                producer = candidateProducer;
+                handler = candidateHandler;
+                failed = false;
+                generation++;
+                publisher.swap(candidate, candidateProducer);
+                // The old producer dies with its session.
+                if (old != null) {
+                    lc.closeOnCloser(old);
+                }
+                lc.counters.sessionsRebuilt.increment();
+                if (generation == 1) {
+                    log.info("SolaceConnector [" + lc.name + "] session " + connectionId + " connected (generation 1)");
+                } else {
+                    log.warn("SolaceConnector [" + lc.name + "] session " + connectionId + " rebuilt (generation " + generation + ")");
+                }
+                // Back to BEFORE_SEND once the session is taken over, so an expiry in the waits that follow leaves
+                // it alone (A51).
+                if (!op.enterStage(PublishOperation.Stage.BEFORE_SEND)) {
+                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                            "session " + connectionId + " connected after the operation's deadline", null, false);
+                }
+                return;
+            } catch (JCSMPException e) {
+                // The failure was the close itself: no back off.
+                if (lc.closed) {
+                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                            "Solace connection '" + lc.name + "' is closed", e);
+                }
+                long delay = Backoff.delay(lc.settings.recoveryInitialDelayMillis, lc.settings.recoveryProgression,
+                        lc.settings.recoveryMaxDelayMillis, attempt);
+                boolean budget = lc.settings.recoveryMaxAttempts >= 0 && attempt >= lc.settings.recoveryMaxAttempts;
+                boolean deadline = op.isExpired() || System.currentTimeMillis() + delay >= deadlineMillis;
+                if (budget || deadline) {
+                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                            "session " + connectionId + " could not be rebuilt: " + e.getMessage(), e);
+                }
+                log.warn("SolaceConnector [" + lc.name + "] session " + connectionId + " rebuild attempt " + attempt
+                        + " failed; next in " + delay + " ms: " + e.getMessage());
+                try {
+                    Thread.sleep(delay);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                            "interrupted while rebuilding session " + connectionId, ie, false);
+                }
+                attempt++;
+            }
+        }
+    }
+
+    /**
+     * The one way a borrowed holder goes back, used by every operation's finally and by the transaction
+     * completion. The core returns by name only, so the return is coordinated with replacement through the per
+     * name lock and with the core's own removal through the idempotent orphan path. No broker call happens under
+     * the lock: disconnect() only submits, and the post return orphan runs outside it.
+     */
+    public void returnToPool() {
+        ConnectionHandler handler = ConnectionHandler.getConnectionHandler();
+        boolean orphan;
+        synchronized (LogicalConnections.lockFor(lc.name)) {
+            // Replaced, closed, or the pool already removed by the core: never enter another pool by name.
+            orphan = LogicalConnections.get(lc.name) != lc || lc.closed
+                    || !handler.checkIfConnectionExists(CONNECTOR_NAME, lc.name);
+            if (!orphan) {
+                // The original pool, by construction of the check above. A pool closed meanwhile destroys the
+                // holder inside this call, through destroyObject and orphan().
+                handler.returnConnection(CONNECTOR_NAME, lc.name, this);
+                // The core removed the pool between the check and the return. Its removal does not take our lock.
+                orphan = !handler.checkIfConnectionExists(CONNECTOR_NAME, lc.name);
+            }
+        }
+        if (orphan) {
+            orphan();
+        }
+    }
+
+    /**
+     * The idempotent claim is around the whole cleanup: whoever wins it submits the closes and then detaches,
+     * exactly once. The loser returns at once.
+     */
+    public void orphan() {
+        if (!orphaned.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            disconnect();
+        } finally {
+            lc.detach(this);
+        }
     }
 
     public TransactedSession getOrCreateTransactedSession() throws JCSMPException {
@@ -606,7 +346,7 @@ public class SolaceConnection implements Connection {
                 TransactedSession newSession = session.createTransactedSession();
                 try {
                     ProducerFlowProperties producerProps = new ProducerFlowProperties();
-                    txProducer = newSession.createProducer(producerProps, new PublishEventHandler());
+                    txProducer = newSession.createProducer(producerProps, publisher.eventHandler());
                     txSession = newSession;
                     log.debug("Transacted session created on connection: " + connectionId);
                 } catch (JCSMPException e) {
@@ -725,13 +465,13 @@ public class SolaceConnection implements Connection {
                     "publishTransacted called but no transacted session active on connection: "
                     + connectionId);
             }
-            Destination destination = resolveDestination(destinationType, destinationName);
-            BytesXMLMessage msg = createMessage(messageType, payload, synCtx);
+            Destination destination = MessageBuilder.resolveDestination(destinationType, destinationName);
+            BytesXMLMessage msg = MessageBuilder.createMessage(messageType, payload, synCtx);
             if (httpContentType != null && !httpContentType.isEmpty()) {
                 msg.setHTTPContentType(httpContentType);
             }
-            msg.setDeliveryMode(resolveDeliveryMode(deliveryMode));
-            applyMessageProperties(msg, properties);
+            msg.setDeliveryMode(MessageBuilder.resolveDeliveryMode(deliveryMode));
+            MessageBuilder.applyMessageProperties(msg, properties);
             // Stable correlation key per transacted publish — surfaced in the PublishResult and
             // visible in broker-side message-spool browsing for "where did this message go" diagnostics.
             String correlationKey = "tx-" + connectionId + "-" + UUID.randomUUID();
@@ -748,6 +488,18 @@ public class SolaceConnection implements Connection {
             log.debug("publishTransacted: send returned (pending commit) on connectionId=" + connectionId
                     + " (correlationKey=" + correlationKey + ")");
             return new PublishResult(SolaceConstants.ACK_STATUS_TX_PENDING, false, correlationKey, null);
+        }
+    }
+
+    /** Transaction executor thread only (3.7). The reply goes out on the transacted producer and is visible at the commit. */
+    public void sendReplyTransacted(BytesXMLMessage request, BytesXMLMessage reply) throws JCSMPException {
+        synchronized (txLock) {
+            if (txProducer == null) {
+                throw new JCSMPException(
+                    "sendReplyTransacted called but no transacted session active on connection: "
+                    + connectionId);
+            }
+            txProducer.sendReply(request, reply);
         }
     }
 
@@ -1099,8 +851,10 @@ public class SolaceConnection implements Connection {
             if (consumer == null) {
                 XMLMessageConsumer newConsumer = null;
                 try {
-                    // null listener => synchronous consumer (messages pulled via receive()).
-                    newConsumer = session.getMessageConsumer((com.solacesystems.jcsmp.XMLMessageListener) null);
+                    // The guard registered at connect is the consumer to start, so the reconnect handler stays
+                    // with the session (A45). Without one, a null listener gives the synchronous consumer as today.
+                    XMLMessageConsumer guard = handler.guard();
+                    newConsumer = guard != null ? guard : session.getMessageConsumer((XMLMessageListener) null);
                     newConsumer.start();
                     // Publish to the field only once fully started, so a start() failure can't
                     // leave a half-initialized consumer that later calls would blindly reuse.
@@ -1124,6 +878,8 @@ public class SolaceConnection implements Connection {
                             }
                         }
                     }
+                    // The next call creates a fresh consumer (A45).
+                    handler.clearGuard();
                     throw new JCSMPException("Failed to create session consumer on connection "
                             + connectionId, e);
                 }
@@ -1175,38 +931,76 @@ public class SolaceConnection implements Connection {
     }
 
     /**
-     * Disconnects the session and releases resources.
+     * Submit only. Nothing here blocks on the broker, so it is legal under the per name lock and inside
+     * destroyObject. Everything is captured under the lock and nulled at once, and the one closer task reads
+     * only its captured copies, in the 1.0.1 order.
      */
     public void disconnect() {
-        if (consumer != null) {
-            consumer.close();
+        XMLMessageConsumer consumerToClose;
+        XMLMessageProducer producerToClose;
+        JCSMPSession sessionToClose;
+        TransactedSession transactedSession;
+        XMLMessageProducer transactedProducer;
+        Map<String, TxFlowEntry> transactedFlows;
+        synchronized (txLock) {
+            consumerToClose = consumer;
             consumer = null;
-        }
-        if (producer != null) {
-            producer.close();
+            producerToClose = producer;
             producer = null;
+            sessionToClose = session;
+            session = null;
+            transactedSession = txSession;
+            txSession = null;
+            transactedProducer = txProducer;
+            txProducer = null;
+            transactedFlows = new HashMap<>(txFlowReceivers);
+            txFlowReceivers.clear();
         }
-        // Fail any publishes still blocked waiting for a broker ACK: the session is going away,
-        // so no ack/nack callback will ever arrive. Completing the futures exceptionally
-        // releases those threads immediately (otherwise they'd wait out the full ack timeout)
-        // and clears the tracking map. completeExceptionally on an already-completed future is
-        // a no-op, so this is safe against a callback racing in.
-        if (!pendingAcks.isEmpty()) {
-            JCSMPException closing = new JCSMPException(
-                    "Connection " + connectionId + " closed before publish ACK was received");
-            for (CompletableFuture<Void> future : pendingAcks.values()) {
-                future.completeExceptionally(closing);
+        // Completes the pending acknowledgement futures exceptionally, inline, no broker call.
+        publisher.failPending("Connection " + connectionId + " closed before publish ACK was received");
+        lc.closer.execute(() -> {
+            try {
+                if (consumerToClose != null) {
+                    consumerToClose.close();
+                }
+            } catch (Exception e) {
+                log.debug("Solace connection " + connectionId + ": consumer close failed", e);
             }
-            pendingAcks.clear();
-        }
-        // Always release transacted resources, even if the underlying session was already
-        // closed externally (e.g. during a reconnect storm) — prevents producer/session leaks.
-        closeTransactedSession();
-        if (session != null && !session.isClosed()) {
-            session.closeSession();
-            log.info("Solace connection closed: " + connectionId);
-        }
-        session = null;
+            try {
+                if (producerToClose != null) {
+                    producerToClose.close();
+                }
+            } catch (Exception e) {
+                log.debug("Solace connection " + connectionId + ": producer close failed", e);
+            }
+            for (Map.Entry<String, TxFlowEntry> entry : transactedFlows.entrySet()) {
+                try {
+                    entry.getValue().receiver.close();
+                } catch (Exception ex) {
+                    log.warn("Error closing transacted flow receiver for queue '" + entry.getKey()
+                            + "' on connection " + connectionId + ": " + ex.getMessage());
+                }
+            }
+            try {
+                if (transactedProducer != null) {
+                    transactedProducer.close();
+                }
+            } catch (Exception e) {
+                log.debug("Solace connection " + connectionId + ": transacted producer close failed", e);
+            }
+            try {
+                if (transactedSession != null) {
+                    transactedSession.close();
+                }
+            } catch (Exception e) {
+                log.debug("Solace connection " + connectionId + ": transacted session close failed", e);
+            }
+            if (sessionToClose != null) {
+                Hooks.get().point("closer.beforeClose", sessionToClose);
+                SolaceLogicalConnection.closeQuietly(sessionToClose);
+                log.info("Solace connection closed: " + connectionId);
+            }
+        });
     }
 
     @Override
@@ -1216,49 +1010,6 @@ public class SolaceConnection implements Connection {
 
     @Override
     public void close() throws ConnectException {
-        disconnect();
-    }
-
-    /**
-     * Handler for asynchronous publish events (acks and errors). Non-static so it can
-     * signal the {@link #pendingAcks} futures owned by the surrounding connection —
-     * required for the synchronous {@code waitForAck} path in {@link #publish}.
-     */
-    private class PublishEventHandler implements JCSMPStreamingPublishCorrelatingEventHandler {
-
-        @Override
-        public void responseReceivedEx(Object correlationKey) {
-            if (correlationKey instanceof String) {
-                CompletableFuture<Void> future = pendingAcks.remove(correlationKey);
-                if (future != null) {
-                    future.complete(null);
-                }
-            }
-            if (log.isDebugEnabled()) {
-                log.debug("Publish ACK received. CorrelationKey: " + correlationKey);
-            }
-        }
-
-        @Override
-        public void handleErrorEx(Object correlationKey, JCSMPException cause, long timestamp) {
-            if (correlationKey instanceof String) {
-                CompletableFuture<Void> future = pendingAcks.remove(correlationKey);
-                if (future != null) {
-                    future.completeExceptionally(cause);
-                }
-            }
-            if (cause instanceof JCSMPErrorResponseException) {
-                JCSMPErrorResponseException errResp = (JCSMPErrorResponseException) cause;
-                log.error("Publish NACK - broker rejected message. CorrelationKey: " + correlationKey
-                        + ", subcode: " + errResp.getSubcodeEx()
-                        + ", responseCode: " + errResp.getResponseCode()
-                        + ", info: " + errResp.getResponsePhrase(), cause);
-            } else if (cause instanceof JCSMPTransportException) {
-                log.error("Publish error - transport failure. CorrelationKey: " + correlationKey
-                        + ", cause: " + cause.getMessage(), cause);
-            } else {
-                log.error("Publish error. CorrelationKey: " + correlationKey, cause);
-            }
-        }
+        orphan();
     }
 }

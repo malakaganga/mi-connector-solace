@@ -20,17 +20,36 @@ package org.wso2.integration.connector.operation;
 
 import org.apache.synapse.MessageContext;
 import org.apache.synapse.core.axis2.Axis2MessageContext;
+import org.wso2.integration.connector.SolaceFault;
 import org.wso2.integration.connector.connection.SolaceTransactionRegistry;
+import org.wso2.integration.connector.connection.TransactionExecutor;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnector;
 import org.wso2.integration.connector.core.ConnectException;
-import org.wso2.integration.connector.core.connection.ConnectionHandler;
+import org.wso2.integration.connector.core.util.ConnectorUtils;
+
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_INBOUND_TRANSACTION;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_UNKNOWN;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_INBOUND_TRANSACTION;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_UNKNOWN;
+import static org.wso2.integration.connector.constants.SolaceConstants.TX_COMPLETION_WAIT_MS;
 
 public class SolaceCommit extends AbstractConnector {
 
     @Override
     public void connect(MessageContext messageContext) throws ConnectException {
         log.debug("solace.commit: invoked");
+        if (messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_TX) instanceof Executor) {
+            fault(FAULT_INBOUND_TRANSACTION, ERROR_CODE_INBOUND_TRANSACTION,
+                    "commit/rollback are the inbound's in transacted mode: acknowledge or nack the message instead",
+                    null, messageContext);
+            return;
+        }
         String txId = (String) ((Axis2MessageContext) messageContext).getAxis2MessageContext()
                 .getProperty(SolaceConstants.TX_CONNECTION_ID);
         if (txId == null) {
@@ -47,20 +66,43 @@ public class SolaceCommit extends AbstractConnector {
         log.debug("solace.commit: txId=" + txId + " unregistered; committing on connectionId="
                 + entry.connection.getConnectionId() + " (connectionName=" + entry.connectionName + ")");
         try {
-            entry.connection.commitTransaction();
+            // The completion runs on the transaction's own thread and is never cancelled from here. The wait is
+            // bounded, the completion is not (G10).
+            TransactionExecutor.CompletionCommand completion = entry.executor.completionCommand(true);
+            entry.executor.execute(completion);
+            completion.get(TX_COMPLETION_WAIT_MS, TimeUnit.MILLISECONDS);
             log.info("solace.commit: txId=" + txId + " committed successfully");
-        } catch (Exception e) {
-            log.error("solace.commit: txId=" + txId + " commit failed: " + e.getMessage(), e);
-            throw new ConnectException(e, "Failed to commit Solace transaction " + txId);
+        } catch (TimeoutException e) {
+            fault(FAULT_UNKNOWN, ERROR_CODE_UNKNOWN, "completion of transaction " + txId + " did not finish within "
+                    + TX_COMPLETION_WAIT_MS + " ms; it continues on its owner", null, messageContext);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof SolaceFault) {
+                fault((SolaceFault) cause, messageContext);
+            } else {
+                fault(FAULT_UNKNOWN, ERROR_CODE_UNKNOWN,
+                        "commit of transaction " + txId + " failed; its result is unknown", cause, messageContext);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            fault(FAULT_UNKNOWN, ERROR_CODE_UNKNOWN, "completion of transaction " + txId
+                    + " was interrupted while this operation waited, it continues on its owner", e, messageContext);
         } finally {
             // Registry entry is already gone — strip the context marker and release the
             // pinned connection regardless of commit outcome so the flow doesn't carry a
             // dead txId into the next operation.
             ((Axis2MessageContext) messageContext).getAxis2MessageContext()
                     .removeProperty(SolaceConstants.TX_CONNECTION_ID);
-            ConnectionHandler.getConnectionHandler().returnConnection(
-                    SolaceConstants.CONNECTOR_NAME, entry.connectionName, entry.connection);
-            log.debug("solace.commit: txId=" + txId + " connection returned to pool");
         }
+    }
+
+    private void fault(SolaceFault fault, MessageContext messageContext) {
+        fault(fault.name, fault.code, fault.getMessage(), fault.getCause(), messageContext);
+    }
+
+    private void fault(String name, int code, String message, Throwable cause, MessageContext messageContext) {
+        String text = name + ": " + message;
+        ConnectorUtils.setErrorPropertiesToMessage(messageContext, String.valueOf(code), text);
+        handleException(text, cause instanceof Exception ? (Exception) cause : null, messageContext);
     }
 }

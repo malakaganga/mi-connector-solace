@@ -43,6 +43,10 @@
         "receiveTimestamp": {
           "type": "integer",
           "description": "Epoch timestamp in milliseconds when the reply was received. Present only when greater than zero."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "UNKNOWN when the deadline, an interrupt or a transport failure cut the request publish off after the send was entered. The request may or may not have reached the broker, so a retry is at least once. Absent otherwise."
         }
       },
       "required": [

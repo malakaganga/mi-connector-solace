@@ -27,6 +27,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.wso2.integration.connector.SolaceFault;
 import org.wso2.integration.connector.connection.SolaceConnection;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnectorOperation;
@@ -78,7 +79,14 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
         ConnectionHandler handler = ConnectionHandler.getConnectionHandler();
         SolaceConnection connection = null;
         try {
+            String requestTimeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                    SolaceConstants.CACHE_REQUEST_TIMEOUT);
+            long requestTimeout = SolaceUtils.parseLongOrDefault(requestTimeoutStr,
+                    SolaceConstants.DEFAULT_CACHE_REQUEST_TIMEOUT_MS, SolaceConstants.CACHE_REQUEST_TIMEOUT);
+
             connection = (SolaceConnection) handler.getConnection(SolaceConstants.CONNECTOR_NAME, connectionName);
+            // The first call after the borrow: connects the holder on first use, or rebuilds it (guide 3.3).
+            connection.ensureSession(System.currentTimeMillis() + requestTimeout);
             if (connection == null || !connection.isConnected()) {
                 handleException("Solace connection is not available or not connected.", messageContext);
                 return;
@@ -110,11 +118,6 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
             String maxAgeStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                     SolaceConstants.CACHE_MAX_AGE_SECONDS);
             int maxAge = SolaceUtils.parseIntOrDefault(maxAgeStr, 0, SolaceConstants.CACHE_MAX_AGE_SECONDS);
-
-            String requestTimeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.CACHE_REQUEST_TIMEOUT);
-            long requestTimeout = SolaceUtils.parseLongOrDefault(requestTimeoutStr,
-                    SolaceConstants.DEFAULT_CACHE_REQUEST_TIMEOUT_MS, SolaceConstants.CACHE_REQUEST_TIMEOUT);
 
             String liveDataAction = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                     SolaceConstants.CACHE_LIVE_DATA_ACTION);
@@ -151,6 +154,11 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
             handleConnectorResponse(messageContext, responseVariable, overwriteBody,
                     messagesJson.toString(), null, attributes);
 
+        } catch (SolaceFault fault) {
+            String text = fault.name + ": " + fault.getMessage();
+            ConnectorUtils.setErrorPropertiesToMessage(messageContext, String.valueOf(fault.code), text);
+            handleException(text, fault.getCause() instanceof Exception ? (Exception) fault.getCause() : null,
+                    messageContext);
         } catch (JCSMPException e) {
             // Surface the prerequisites in the error so users have a hint about likely root cause.
             handleException("Solace cache request failed: " + e.getMessage()
@@ -167,7 +175,7 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
                     e, messageContext);
         } finally {
             if (connection != null) {
-                handler.returnConnection(SolaceConstants.CONNECTOR_NAME, connectionName, connection);
+                connection.returnToPool();
             }
         }
     }
