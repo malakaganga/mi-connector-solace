@@ -92,6 +92,9 @@ public final class PollFlowOwner implements Runnable {
     private int liveLeaseCount = 0;
     volatile long lastUsedAt = System.currentTimeMillis();
     volatile boolean closed = false;
+    // Set by the flow event handler on FLOW_RECONNECTING and FLOW_DOWN before it queues the close, reset at bind:
+    // a message received after it is never leased, exposed or acknowledged (A66).
+    volatile boolean invalidated = false;
     private ScheduledFuture<?> idleTimer;
 
     PollFlowOwner(PollSession ps, String key, String queue, String selector) {
@@ -155,6 +158,7 @@ public final class PollFlowOwner implements Runnable {
 
     /** Operation thread, outside ps.flows (ownerFor). */
     void bind() throws JCSMPException {
+        invalidated = false;
         ConsumerFlowProperties flowProperties = new ConsumerFlowProperties();
         flowProperties.setEndpoint(JCSMPFactory.onlyInstance().createQueue(queue));
         flowProperties.setStartState(true);
@@ -260,6 +264,13 @@ public final class PollFlowOwner implements Runnable {
                     return;
                 }
                 continue;
+            }
+            if (invalidated) {
+                // The flow left the connected state: the message is not leased, not exposed and not acknowledged,
+                // the flow close returns it to the broker. The request is answered as a close between slices
+                // answers it, and the queued close runs next (A66).
+                expire(request);
+                return;
             }
             // Every received message gets the owner's lease before the hand off, whatever the ackMode.
             PollLease lease = new PollLease(this, generation, message,

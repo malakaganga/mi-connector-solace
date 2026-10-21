@@ -23,14 +23,13 @@ import com.solacesystems.jcsmp.XMLMessageConsumer;
 import com.solacesystems.jcsmp.XMLMessageListener;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.wso2.integration.connector.SolaceFault;
 
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The one dedicated request reply session of a logical connection (guide 3.6, design 7.10).
- * Created by createSession(), connected by connectSession() inside the creation attempt of 3.3.
+ * Created by createSession() and connected by the creation attempt of 3.3, one physical attempt at a time (A62).
  */
 public final class RequestReplySession {
 
@@ -48,7 +47,7 @@ public final class RequestReplySession {
     private final AtomicBoolean retiredOnce = new AtomicBoolean();
     private final String connectionId;
     // The handler of the session, with the reconnect guard registered at connect (A45).
-    private volatile PooledSessionEventHandler handler;
+    volatile PooledSessionEventHandler handler;
 
     RequestReplySession(SolaceLogicalConnection lc) {
         this.lc = lc;
@@ -68,23 +67,9 @@ public final class RequestReplySession {
         return created;
     }
 
-    void connectSession(PublishOperation op) throws JCSMPException, SolaceFault {
-        JCSMPSession connecting = session;
-        try {
-            lc.connectSession(connecting, handler, op);
-        } catch (JCSMPException e) {
-            // The closer already has the session.
-            session = null;
-            throw e;
-        }
-        try {
-            publisher.swap(connecting, connecting.getMessageProducer(publisher.eventHandler()));
-        } catch (JCSMPException e) {
-            // A connected session whose producer failed goes to the closer here, once.
-            session = null;
-            lc.closeOnCloser(connecting);
-            throw e;
-        }
+    /** After the connect: the producer of the connected session, and the publisher rebuilt with it. */
+    void installProducer() throws JCSMPException {
+        publisher.swap(session, session.getMessageProducer(publisher.eventHandler()));
     }
 
     /**

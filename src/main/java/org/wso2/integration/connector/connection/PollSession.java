@@ -32,11 +32,9 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_EXPIRED;
 import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_INVALID_CONFIG;
 import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_POLL_ERROR;
 import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_POLL_FLOW_LIMIT;
-import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_EXPIRED;
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_INVALID_CONFIG;
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POLL_ERROR;
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POLL_FLOW_LIMIT;
@@ -45,7 +43,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.REQUIRE_O
 /**
  * The one dedicated poll session of a logical connection and its cache of poll flow owners (guide 3.5, design
  * 7.10). Created lazily and connected by SolaceLogicalConnection.pollSession(op) outside the dedicated lock, under
- * the poll operation's record. Rebuilt on the next use after DOWN_ERROR.
+ * the poll operation's record and one physical attempt at a time (A62). Rebuilt on the next use after DOWN_ERROR.
  */
 public final class PollSession {
 
@@ -78,49 +76,18 @@ public final class PollSession {
         lc.attach(this);
     }
 
-    /** The creation attempt (3.3), outside every lock. The record bounds the connect (3.4). */
-    void connect(PublishOperation op) throws JCSMPException, SolaceFault {
+    /** The creation attempt (3.3): the session and its handler, not connected. The logical connection connects it. */
+    JCSMPSession createSession() throws JCSMPException {
         PooledSessionEventHandler sessionHandler = new PooledSessionEventHandler(this);
         JCSMPSession created = lc.createSession("poll", sessionHandler);
         sessionHandler.bind(created);
         handler = sessionHandler;
         session = created;
-        // Attached before connect: an expiry during the connect closes exactly this session.
-        if (!op.attachSession(created)) {
-            session = null;
-            lc.closeOnCloser(created);
-            throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                    "poll timed out before the poll session connected", null, false);
-        }
-        // The stage tells the watchdog the created session is in use: from here an expiry closes it (A51).
-        if (!op.enterStage(PublishOperation.Stage.CONNECTING)) {
-            session = null;
-            lc.closeOnCloser(created);
-            throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                    "poll timed out before the poll session connected", null, false);
-        }
-        try {
-            lc.connectSession(created, sessionHandler, op);
-        } catch (JCSMPException e) {
-            // connectSession already handed the session to the closer. The field is cleared so retire() does not
-            // submit it twice.
-            session = null;
-            throw e;
-        }
-        // The transfer decision, atomic with expire() and with the deadline (3.4): a late connect is with the
-        // closer and never published, whatever the watchdog's timing.
-        if (!op.transferSession()) {
-            session = null;
-            throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                    "poll timed out as the poll session connected", null, false);
-        }
-        // The transfer won: the record holds nothing, and the stage returns to BEFORE_SEND (A51).
-        op.enterStage(PublishOperation.Stage.BEFORE_SEND);
-        negotiate(created);
+        return created;
     }
 
-    /** The 1.6 algorithm on the connector side. A TRUE mismatch is reported by the first poll. */
-    private void negotiate(JCSMPSession connected) throws JCSMPException {
+    /** The 1.6 algorithm on the connector side, after the connect. A TRUE mismatch is reported by the first poll. */
+    void negotiate(JCSMPSession connected) throws JCSMPException {
         // ArrayList<Boolean> [accepted, failed, rejected], or null on a broker without the capability (Appendix A).
         Object capability = connected.getCapability(CapabilityType.SUPPORTED_MESSAGE_SETTLEMENT_CAPABILITIES);
         List<?> outcomes = capability instanceof List ? (List<?>) capability : null;

@@ -91,6 +91,12 @@ public class SolaceConnection implements Connection {
     public volatile boolean failed = false;
     // The handler of the current session, with the reconnect guard registered at connect (A45).
     private volatile PooledSessionEventHandler handler;
+    // The publication monitor: the session, the producer and the handler change under it, the handler of the
+    // current session alone writes failed under it, and the connect reservation lives under it (A62, A63).
+    private final Object publication = new Object();
+    // The physical connect attempt in progress of this holder, null when none (guarded by publication). It outlives
+    // a borrower whose budget ended, and the next borrower joins it (A62).
+    private SolaceLogicalConnection.ConnectAttempt connectAttempt;
     // 3.4: the producer lock, the pending acknowledgements and the send algorithm. Rebuilt with the session.
     public final SessionPublisher publisher;
     // The one cleanup claim (orphan()).
@@ -203,62 +209,82 @@ public class SolaceConnection implements Connection {
                         "session " + connectionId + " could not be rebuilt within the operation's deadline", null, false);
             }
             try {
-                // Not connected yet. The same client name as the predecessor, so the broker evicts the zombie.
-                PooledSessionEventHandler candidateHandler = new PooledSessionEventHandler(this);
-                JCSMPSession candidate = lc.createSession(String.valueOf(index), candidateHandler);
-                candidateHandler.bind(candidate);
-                // Attached before connect, so an expiry during the connect closes exactly this session.
-                if (!op.attachSession(candidate)) {
-                    lc.closeOnCloser(candidate);
-                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                            "operation expired during the session rebuild", null, false);
+                SolaceLogicalConnection.ConnectAttempt running;
+                synchronized (publication) {
+                    running = connectAttempt;
+                    if (running == null) {
+                        // Not connected yet. The same client name as the predecessor, so the broker evicts the
+                        // zombie.
+                        PooledSessionEventHandler candidateHandler = new PooledSessionEventHandler(this);
+                        JCSMPSession candidate = lc.createSession(String.valueOf(index), candidateHandler);
+                        candidateHandler.bind(candidate);
+                        // The reservation: one physical attempt of this holder at a time (A62).
+                        running = lc.startAttempt(candidate, candidateHandler, null, publication, () -> {
+                            lc.closeOnCloser(candidate);
+                            connectAttempt = null;
+                        });
+                        connectAttempt = running;
+                    }
+                    running.waiters++;
                 }
-                // The stage tells the watchdog the candidate is in use: from here an expiry closes it (A51).
-                if (!op.enterStage(PublishOperation.Stage.CONNECTING)) {
-                    lc.closeOnCloser(candidate);
-                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                            "operation expired during the session rebuild", null, false);
-                }
-                // The connect runs on a connect thread and this thread waits under the record's remaining budget.
-                // A SolaceFault from it is thrown through, nothing was sent (A52).
-                lc.connectSession(candidate, candidateHandler, op);
+                // Waits under the record's remaining budget and claims the connected session, or faults: a spent
+                // budget leaves the attempt running for the next borrower (A62). A SolaceFault is thrown through,
+                // nothing was sent.
+                lc.awaitAttempt(running, op);
+                JCSMPSession candidate = running.session;
+                PooledSessionEventHandler candidateHandler = running.handler;
                 XMLMessageProducer candidateProducer;
                 try {
                     candidateProducer = candidate.getMessageProducer(publisher.eventHandler());
                 } catch (JCSMPException e) {
                     // The creation obligation lasts through producer creation.
-                    lc.closeOnCloser(candidate);
+                    synchronized (publication) {
+                        running.releaseOnce();
+                    }
                     throw e;
                 }
-                if (transferAtPublication) {
-                    // The transfer decision (3.4), atomic with expire() and with the deadline under the record's
-                    // monitor. Refused means the candidate is with the closer and is never published.
-                    if (!op.transferSession()) {
-                        throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                                "session " + connectionId + " connected after the operation's deadline", null, false);
+                synchronized (publication) {
+                    if (candidateHandler.failedBeforePublication) {
+                        // The candidate went down before it was published: a failed connect (A63).
+                        running.releaseOnce();
+                        throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                                "session " + connectionId + " went down before it was published");
                     }
-                } else if (op.expiredWith(candidate)) {
-                    // The publish path keeps the record attached. This early refusal only avoids publishing a
-                    // session the watchdog is already closing.
-                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                            "session " + connectionId + " connected after the operation's deadline", null, false);
-                }
-                JCSMPSession old = session;
-                session = candidate;
-                producer = candidateProducer;
-                handler = candidateHandler;
-                failed = false;
-                generation++;
-                publisher.swap(candidate, candidateProducer);
-                // The old producer dies with its session.
-                if (old != null) {
-                    lc.closeOnCloser(old);
+                    JCSMPSession old = session;
+                    PooledSessionEventHandler oldHandler = handler;
+                    // The old handler is retired before the old close is queued and before the publication (A63).
+                    if (oldHandler != null) {
+                        oldHandler.retire();
+                    }
+                    // Detached, never closed here: the old session's close closes its consumer. The next
+                    // ensureConsumer builds the new session's consumer from the new guard (A64).
+                    synchronized (consumerLock) {
+                        consumer = null;
+                    }
+                    session = candidate;
+                    producer = candidateProducer;
+                    handler = candidateHandler;
+                    failed = false;
+                    generation++;
+                    publisher.swap(candidate, candidateProducer);
+                    // The old producer dies with its session.
+                    if (old != null) {
+                        lc.closeOnCloser(old);
+                    }
+                    // The reservation ends with the publication.
+                    connectAttempt = null;
                 }
                 lc.counters.sessionsRebuilt.increment();
                 if (generation == 1) {
                     log.info("SolaceConnector [" + lc.name + "] session " + connectionId + " connected (generation 1)");
                 } else {
                     log.warn("SolaceConnector [" + lc.name + "] session " + connectionId + " rebuilt (generation " + generation + ")");
+                }
+                if (!transferAtPublication && !op.attachSession(candidate)) {
+                    // The publish path keeps the record on the session it publishes with. Refused once the record
+                    // expired meanwhile: the session stays healthy at BEFORE_SEND (A51).
+                    throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                            "session " + connectionId + " connected after the operation's deadline", null, false);
                 }
                 // Back to BEFORE_SEND once the session is taken over, so an expiry in the waits that follow leaves
                 // it alone (A51).
@@ -276,8 +302,11 @@ public class SolaceConnection implements Connection {
                 long delay = Backoff.delay(lc.settings.recoveryInitialDelayMillis, lc.settings.recoveryProgression,
                         lc.settings.recoveryMaxDelayMillis, attempt);
                 boolean budget = lc.settings.recoveryMaxAttempts >= 0 && attempt >= lc.settings.recoveryMaxAttempts;
+                // The configured connect retries bound the physical attempts of this loop, each connecting once. The
+                // value -1 is unlimited with the back off (A62).
+                boolean retriesSpent = lc.connectRetries >= 0 && attempt > lc.connectRetries;
                 boolean deadline = op.isExpired() || System.currentTimeMillis() + delay >= deadlineMillis;
-                if (budget || deadline) {
+                if (budget || retriesSpent || deadline) {
                     throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
                             "session " + connectionId + " could not be rebuilt: " + e.getMessage(), e);
                 }
@@ -292,6 +321,17 @@ public class SolaceConnection implements Connection {
                 }
                 attempt++;
             }
+        }
+    }
+
+    /** The handler of the current session alone writes the failed flag, under the publication monitor (A63). */
+    boolean markFailed(PooledSessionEventHandler reporting) {
+        synchronized (publication) {
+            if (handler != reporting) {
+                return false;
+            }
+            failed = true;
+            return true;
         }
     }
 

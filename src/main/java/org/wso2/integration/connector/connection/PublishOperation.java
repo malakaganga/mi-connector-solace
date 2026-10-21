@@ -98,9 +98,16 @@ public final class PublishOperation {
         return deadline - System.currentTimeMillis();
     }
 
-    /** The operation thread moves the stage. Refused once the record is EXPIRED, so no send starts after an expiry (A51). */
+    /**
+     * The operation thread moves the stage. Refused once the record is EXPIRED, so no send starts after an expiry
+     * (A51). The claim of SENDING also reads the absolute deadline, so a spent budget never becomes a send when the
+     * watchdog is late (A67).
+     */
     public synchronized boolean enterStage(Stage next) {
         if (state == State.EXPIRED) {
+            return false;
+        }
+        if (next == Stage.SENDING && System.currentTimeMillis() >= deadline) {
             return false;
         }
         stage = next;

@@ -99,6 +99,22 @@ public final class ConnectionSettings {
                 MAX_CONCURRENT_REQUESTS, DEFAULT_MAX_CONCURRENT_REQUESTS, collected);
         this.pubAckWindowSize = parseInt(parameter(messageContext, PUB_ACK_WINDOW_SIZE), PUB_ACK_WINDOW_SIZE, 1,
                 collected);
+        // The range checks after the parses. No timer of the connector reads 0 as disabled (A65).
+        if (pollAckTimeoutMillis < 1) {
+            collected.add(POLL_ACK_TIMEOUT + " must be at least 1, got " + pollAckTimeoutMillis);
+        }
+        if (pollFlowIdleTimeoutMillis < 1) {
+            collected.add(POLL_FLOW_IDLE_TIMEOUT + " must be at least 1, got " + pollFlowIdleTimeoutMillis);
+        }
+        if (maxPollFlows < 1) {
+            collected.add(MAX_POLL_FLOWS + " must be at least 1, got " + maxPollFlows);
+        }
+        if (maxConcurrentRequests < 1) {
+            collected.add(MAX_CONCURRENT_REQUESTS + " must be at least 1, got " + maxConcurrentRequests);
+        }
+        if (pubAckWindowSize < 1 || pubAckWindowSize > 255) {
+            collected.add(PUB_ACK_WINDOW_SIZE + " must be between 1 and 255, got " + pubAckWindowSize);
+        }
 
         this.recoveryInitialDelayMillis = parseLong(parameter(messageContext, RECOVERY_INITIAL_DELAY),
                 RECOVERY_INITIAL_DELAY, 1000, collected);

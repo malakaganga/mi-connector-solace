@@ -84,6 +84,10 @@ public final class SolaceLogicalConnection {
     // The connect threads. A connect runs here under the operation's deadline, because JCSMP's connect() does not
     // notice a closeSession() while it waits on the transport or the login reply (A52).
     final ExecutorService connects;
+    // The connect retries of the template, JCSMP's default 0 when absent. A physical attempt connects once, so the
+    // retries bound the attempts of the recovery loop instead (A62).
+    final int connectRetries;
+    private final AtomicBoolean retriesLogged = new AtomicBoolean();
     public final ConnectionCounters counters = new ConnectionCounters();
     // 1, 2, ... assigned to pooled SolaceConnection objects at creation.
     final AtomicInteger pooledIndex = new AtomicInteger();
@@ -99,6 +103,10 @@ public final class SolaceLogicalConnection {
     // under its own deadline instead of being refused (A53).
     private CompletableFuture<PollSession> pollCreation;
     private CompletableFuture<RequestReplySession> rrCreation;
+    // The physical connect attempt in progress of each dedicated session, null when none (guarded by dedicated).
+    // It outlives a creator whose budget ended, and the next creator joins it (A62).
+    private ConnectAttempt rrAttempt;
+    private ConnectAttempt pollAttempt;
     // Guarded by dedicated. PollSession's generation number.
     int pollGeneration;
     // Owner tokens of the two creation reservations (the attachment table).
@@ -120,6 +128,8 @@ public final class SolaceLogicalConnection {
         this.nodeId = ClientNames.nodeId().id;
         this.configuration = messageContext.getConfiguration();
         this.baseProperties = SolaceUtils.buildJCSMPProperties(messageContext);
+        this.connectRetries = ((JCSMPChannelProperties) baseProperties.getProperty(
+                JCSMPProperties.CLIENT_CHANNEL_PROPERTIES)).getConnectRetries();
         // parse() cannot fail here. connect() validated the same template before calling create().
         this.settings = ConnectionSettings.parse(messageContext);
         this.context = JCSMPFactory.onlyInstance().createContext(new ContextProperties().setName("solace-conn-" + name));
@@ -158,59 +168,190 @@ public final class SolaceLogicalConnection {
         if (settings.keepAliveLimit >= 0) {
             channelProperties.setKeepAliveLimit(settings.keepAliveLimit);
         }
+        // A physical attempt connects once. The configured retries bound the recovery loop instead (A62).
+        channelProperties.setConnectRetries(0);
+        channelProperties.setConnectRetriesPerHost(0);
+        if (retriesLogged.compareAndSet(false, true)) {
+            log.info("SolaceConnector [" + name + "] connect retries " + connectRetries
+                    + " apply to the recovery loop, each physical attempt connects once");
+        }
         return JCSMPFactory.onlyInstance().createSession(sessionProperties, context, handler);
     }
 
     /**
-     * The caller has attached the session to its operation record (3.4) and entered the CONNECTING stage before
-     * this call, so an expiry during the connect closes exactly this session. The connect runs on a connect thread
-     * and this thread waits for it under the record's remaining budget: JCSMP's connect() does not notice a
-     * closeSession() while it waits on the transport or the login reply, so the closer alone could not cut it
-     * (A52). A failed connect is handed to the closer, never closed inline. The reconnect guard is registered once
-     * the session is connected, and its failure is a connect failure (A45).
+     * One physical connect attempt of a holder, the reservation of A62. A holder keeps at most one at a time under
+     * its publication monitor, taken before the connect is submitted and released when the attempt ended: the
+     * session published, or handed to the closer after a failed connect or after every caller gave up.
      */
-    void connectSession(JCSMPSession connecting, PooledSessionEventHandler handler, PublishOperation op)
-            throws JCSMPException, SolaceFault {
+    static final class ConnectAttempt {
+
+        final JCSMPSession session;
+        final PooledSessionEventHandler handler;
         // Read before the connect starts: every method of the JCSMP session is synchronized, so a read while
         // connect() holds the monitor would wait for the connect itself (D57).
-        String clientName = String.valueOf(connecting.getProperty(JCSMPProperties.CLIENT_NAME));
+        final String clientName;
+        // The candidate of a dedicated session, the RequestReplySession or the PollSession built for this attempt.
+        final Object candidate;
+        // The holder's publication monitor.
+        final Object monitor;
+        // The holder's release: it clears the reservation and hands the session to the closer. Runs under monitor.
+        private final Runnable release;
         Future<?> connect;
+        // The callers waiting on the connect. Guarded by monitor.
+        int waiters;
+        // The connect ended. Guarded by monitor.
+        boolean done;
+        // A caller took the connected session for its publication. Guarded by monitor.
+        boolean claimed;
+        private boolean released;
+        // The connect failure the waiters rethrow. Guarded by monitor.
+        JCSMPException failure;
+
+        ConnectAttempt(JCSMPSession session, PooledSessionEventHandler handler, Object candidate, Object monitor,
+                       Runnable release) {
+            this.session = session;
+            this.handler = handler;
+            this.clientName = String.valueOf(session.getProperty(JCSMPProperties.CLIENT_NAME));
+            this.candidate = candidate;
+            this.monitor = monitor;
+            this.release = release;
+        }
+
+        /** Under monitor. */
+        void releaseOnce() {
+            if (released) {
+                return;
+            }
+            released = true;
+            release.run();
+        }
+    }
+
+    /**
+     * Holder thread, under the holder's publication monitor with no attempt reserved. Submits the connect of the
+     * candidate and returns the attempt the holder stores as its reservation (A62). The connect thread connects
+     * once, createSession set the JCSMP retries to 0, and registers the reconnect guard (A45). When the connect
+     * fails, or succeeds after every caller gave up, the task itself hands the session to the closer and releases
+     * the reservation, so the closer never waits inside a running connect.
+     */
+    ConnectAttempt startAttempt(JCSMPSession candidate, PooledSessionEventHandler handler, Object dedicatedCandidate,
+                                Object monitor, Runnable release) throws SolaceFault {
+        ConnectAttempt attempt = new ConnectAttempt(candidate, handler, dedicatedCandidate, monitor, release);
         try {
-            connect = connects.submit(() -> {
-                connecting.connect();
-                handler.registerGuard();
-                return null;
-            });
+            attempt.connect = connects.submit(() -> connectTask(attempt));
         } catch (RejectedExecutionException e) {
-            // The logical connection is closed.
+            // The logical connection is closed. The candidate has an owner on this exit too.
+            closeOnCloser(candidate);
             throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
                     "Solace connection '" + name + "' is closed", e);
         }
+        return attempt;
+    }
+
+    /** Connect thread. */
+    private void connectTask(ConnectAttempt attempt) {
+        JCSMPException failure = null;
+        boolean connected = false;
         try {
-            connect.get(Math.max(0, op.remaining()), TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof JCSMPException) {
-                closeOnCloser(connecting);
-                throw (JCSMPException) cause;
+            attempt.session.connect();
+            attempt.handler.registerGuard();
+            connected = true;
+        } catch (JCSMPException e) {
+            failure = e;
+        } finally {
+            synchronized (attempt.monitor) {
+                attempt.done = true;
+                attempt.failure = failure;
+                // Failed, or connected with no caller left to publish it: the session goes to the closer after the
+                // connect ended, never during it.
+                if (!connected || (attempt.waiters == 0 && !attempt.claimed)) {
+                    attempt.releaseOnce();
+                }
             }
+        }
+    }
+
+    /**
+     * Holder thread, outside the monitor, counted as a waiter of the attempt. Waits for the connect under the
+     * record's remaining budget and claims the connected session for publication through the transfer rule of
+     * 3.4. A caller whose budget ends records EXPIRED and leaves the attempt running for the next caller. A failed
+     * connect is thrown to the caller as its own failure (A62). On return the caller publishes the session.
+     */
+    void awaitAttempt(ConnectAttempt attempt, PublishOperation op) throws JCSMPException, SolaceFault {
+        try {
+            attempt.connect.get(Math.max(0, op.remaining()), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            leaveAttempt(attempt);
+            // The caller's own timeout: the record is EXPIRED, nothing is closed and the attempt keeps running.
+            op.expire();
+            throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                    "session " + attempt.clientName + " could not be connected within the operation's deadline", null,
+                    false);
+        } catch (ExecutionException e) {
+            leaveAttempt(attempt);
+            Throwable cause = e.getCause();
             if (cause instanceof Error) {
                 throw (Error) cause;
             }
             throw (RuntimeException) cause;
-        } catch (TimeoutException e) {
-            // The caller's own timeout, the transition of T28 K5: the record is EXPIRED and the session, attached at
-            // CONNECTING, goes to the closer. The connect thread finishes on its own and finds its session closed or
-            // closing.
-            op.expire();
-            throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                    "session " + clientName + " could not be connected within the operation's deadline", null, false);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            // The candidate has an owner on every exit (D54).
-            closeOnCloser(connecting);
+            leaveAttempt(attempt);
             throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR, "interrupted while connecting",
                     e, false);
+        }
+        synchronized (attempt.monitor) {
+            attempt.waiters--;
+            if (attempt.failure != null) {
+                // The task handed the session to the closer and released the holder.
+                throw attempt.failure;
+            }
+            if (attempt.claimed) {
+                // Another caller publishes it. The holders serialise their callers, so this is a guard only.
+                throw new JCSMPException("session " + attempt.clientName + " is being published by another caller");
+            }
+            if (!op.transferSession()) {
+                // The transfer rule of 3.4: a late connect is never published. With no caller left the session goes
+                // to the closer.
+                if (attempt.waiters == 0) {
+                    attempt.releaseOnce();
+                }
+                throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                        "session " + attempt.clientName + " connected after the operation's deadline", null, false);
+            }
+            attempt.claimed = true;
+        }
+    }
+
+    /** A caller gave up. The last one to leave an attempt that connected unclaimed hands the session to the closer. */
+    private void leaveAttempt(ConnectAttempt attempt) {
+        synchronized (attempt.monitor) {
+            attempt.waiters--;
+            if (attempt.done && !attempt.claimed && attempt.waiters == 0) {
+                attempt.releaseOnce();
+            }
+        }
+    }
+
+    /** The handler of the published request reply session only writes its failed flag (A63). */
+    boolean markReplyFailed(RequestReplySession reporting) {
+        synchronized (dedicated) {
+            if (rrSession != reporting) {
+                return false;
+            }
+            reporting.failed = true;
+            return true;
+        }
+    }
+
+    /** The handler of the published poll session only writes its failed flag (A63). */
+    boolean markPollFailed(PollSession reporting) {
+        synchronized (dedicated) {
+            if (pollSession != reporting) {
+                return false;
+            }
+            reporting.failed = true;
+            return true;
         }
     }
 
@@ -276,22 +417,63 @@ public final class SolaceLogicalConnection {
             creation = pollCreation;
         }
         PollSession candidate = null;
+        ConnectAttempt attempt = null;
         boolean published = false;
         Throwable failure = null;
         try {
-            // Attaches itself in its constructor. From here the attempt owns the candidate until publication.
-            candidate = new PollSession(this);
-            // createSession("poll", ...), the attach to the record, connectSession and the transfer decision. On a
-            // failure the session is with the closer and the field is null.
-            candidate.connect(op);
+            synchronized (dedicated) {
+                attempt = pollAttempt;
+                if (attempt == null) {
+                    // Attaches itself in its constructor. From here the attempt owns the candidate until publication.
+                    candidate = new PollSession(this);
+                    // createSession("poll", ...), not connected. On a failure the finally retires the candidate.
+                    JCSMPSession created = candidate.createSession();
+                    PollSession reserved = candidate;
+                    // The reservation: one physical attempt of the poll session at a time (A62).
+                    attempt = startAttempt(created, candidate.handler, candidate, dedicated, () -> {
+                        pollAttempt = null;
+                        reserved.retire();
+                    });
+                    pollAttempt = attempt;
+                } else {
+                    // An earlier creator's budget ended: this caller joins its running attempt (A62).
+                    candidate = (PollSession) attempt.candidate;
+                }
+                attempt.waiters++;
+            }
+            // Waits under the record's budget and claims the connected session, or faults. A SolaceFault is thrown
+            // through.
+            awaitAttempt(attempt, op);
+            try {
+                // failedSupported and rejectedSupported with the 1.6 algorithm. A TRUE mismatch is reported by the
+                // first poll.
+                candidate.negotiate(attempt.session);
+            } catch (JCSMPException e) {
+                synchronized (dedicated) {
+                    attempt.releaseOnce();
+                }
+                throw e;
+            }
             PollSession old = null;
             synchronized (dedicated) {
+                if (candidate.handler.failedBeforePublication) {
+                    // The candidate went down before it was published: a failed connect (A63).
+                    attempt.releaseOnce();
+                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                            "the poll session of '" + name + "' went down before it was published");
+                }
                 // The publication fence: a logical connection closed meanwhile never gets a current session.
                 if (!closed) {
                     old = pollSession;
+                    if (old != null) {
+                        // The old handler is retired before the old close is queued and before the publication (A63).
+                        old.handler.retire();
+                    }
                     pollSession = candidate;
                     published = true;
                 }
+                // The reservation ends here, published or not.
+                pollAttempt = null;
             }
             if (!published) {
                 throw new JCSMPException("logical connection '" + name + "' closed during the poll session creation");
@@ -305,21 +487,29 @@ public final class SolaceLogicalConnection {
             failure = e;
             throw e;
         } finally {
-            // Every unsuccessful exit: the candidate's session, if any, goes to the closer and the candidate's
+            // An attempt that still runs stays reserved for the next caller (A62).
+            boolean reserved;
+            synchronized (dedicated) {
+                reserved = attempt != null && pollAttempt == attempt && !attempt.done;
+            }
+            // Every other unsuccessful exit: the candidate's session, if any, goes to the closer and the candidate's
             // attachment is released. retire() is idempotent and tolerates a null session.
-            if (!published && candidate != null) {
+            if (!published && candidate != null && !reserved) {
                 candidate.retire();
             }
-            // The waiters learn the result before the reservation ends (A53).
+            // The waiters learn the result before the reservation ends (A53). A running attempt sends them back to
+            // the healthy check, so the next one joins it.
             if (published) {
                 creation.complete(candidate);
+            } else if (reserved) {
+                creation.complete(null);
             } else if (failure != null) {
                 creation.completeExceptionally(failure);
             }
             synchronized (dedicated) {
                 pollCreation = null;
             }
-            // The reservation is released independently of the candidate, exactly once.
+            // The reservation of the creation is released independently of the candidate, exactly once.
             detach(POLL_CREATION);
         }
     }
@@ -384,43 +574,62 @@ public final class SolaceLogicalConnection {
             creation = rrCreation;
         }
         RequestReplySession candidate = null;
+        ConnectAttempt attempt = null;
         boolean published = false;
         Throwable failure = null;
         try {
-            // Attaches itself. Owned by the attempt until publication.
-            candidate = new RequestReplySession(this);
-            JCSMPSession created = candidate.createSession();
-            if (op != null && !op.attachSession(created)) {
-                // Refused: the finally retires the candidate and its session goes to the closer unused.
-                throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                        "operation expired before the reply session connected", null, false);
+            synchronized (dedicated) {
+                attempt = rrAttempt;
+                if (attempt == null) {
+                    // Attaches itself. Owned by the attempt until publication.
+                    candidate = new RequestReplySession(this);
+                    // createSession("rr", ...), not connected. On a failure the finally retires the candidate.
+                    JCSMPSession created = candidate.createSession();
+                    RequestReplySession reserved = candidate;
+                    // The reservation: one physical attempt of the request reply session at a time (A62).
+                    attempt = startAttempt(created, candidate.handler, candidate, dedicated, () -> {
+                        rrAttempt = null;
+                        reserved.retire();
+                    });
+                    rrAttempt = attempt;
+                } else {
+                    // An earlier creator's budget ended: this caller joins its running attempt (A62).
+                    candidate = (RequestReplySession) attempt.candidate;
+                }
+                attempt.waiters++;
             }
-            // The stage tells the watchdog the created session is in use: from here an expiry closes it (A51).
-            if (op != null && !op.enterStage(PublishOperation.Stage.CONNECTING)) {
-                throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                        "operation expired before the reply session connected", null, false);
-            }
-            // An expiry during the connect closes exactly the created session and the connect throws.
-            candidate.connectSession(op);
-            if (op != null && !op.transferSession()) {
-                // The transfer decision, atomic with expire() and with the deadline (3.4). Refused means the
-                // session is already with the closer, so the field is cleared and retire() does not submit it twice.
-                candidate.session = null;
-                throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
-                        "operation expired as the reply session connected", null, true);
-            }
-            // The transfer won: the record holds nothing, and the stage returns to BEFORE_SEND (A51).
-            if (op != null) {
-                op.enterStage(PublishOperation.Stage.BEFORE_SEND);
+            // Waits under the record's budget and claims the connected session, or faults. A SolaceFault is thrown
+            // through.
+            awaitAttempt(attempt, op);
+            try {
+                candidate.installProducer();
+            } catch (JCSMPException e) {
+                // A connected session whose producer failed goes to the closer, with its reservation.
+                synchronized (dedicated) {
+                    attempt.releaseOnce();
+                }
+                throw e;
             }
             RequestReplySession old = null;
             synchronized (dedicated) {
+                if (candidate.handler.failedBeforePublication) {
+                    // The candidate went down before it was published: a failed connect (A63).
+                    attempt.releaseOnce();
+                    throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                            "the request-reply session of '" + name + "' went down before it was published");
+                }
                 // The logical close fence: a logical connection closed meanwhile never gets a current session.
                 if (!closed) {
                     old = rrSession;
+                    if (old != null) {
+                        // The old handler is retired before the old close is queued and before the publication (A63).
+                        old.handler.retire();
+                    }
                     rrSession = candidate;
                     published = true;
                 }
+                // The reservation ends here, published or not.
+                rrAttempt = null;
             }
             if (!published) {
                 throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
@@ -435,13 +644,21 @@ public final class SolaceLogicalConnection {
             failure = e;
             throw e;
         } finally {
-            // Every unsuccessful exit, the SolaceFault exits included.
-            if (!published && candidate != null) {
+            // An attempt that still runs stays reserved for the next caller (A62).
+            boolean reserved;
+            synchronized (dedicated) {
+                reserved = attempt != null && rrAttempt == attempt && !attempt.done;
+            }
+            // Every other unsuccessful exit, the SolaceFault exits included.
+            if (!published && candidate != null && !reserved) {
                 candidate.retire();
             }
-            // The waiters learn the result before the reservation ends (A53).
+            // The waiters learn the result before the reservation ends (A53). A running attempt sends them back to
+            // the healthy check, so the next one joins it.
             if (published) {
                 creation.complete(candidate);
+            } else if (reserved) {
+                creation.complete(null);
             } else if (failure != null) {
                 creation.completeExceptionally(failure);
             }

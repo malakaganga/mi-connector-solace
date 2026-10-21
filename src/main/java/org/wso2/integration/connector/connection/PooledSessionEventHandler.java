@@ -49,6 +49,11 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
     private volatile JCSMPSession session;
     // Never started and without a subscription. It only carries this handler to JCSMP.
     private volatile XMLMessageConsumer guard;
+    // Set by the holder when this session is replaced, before the old close is queued and before the publication.
+    // A retired handler changes no holder state (A63).
+    volatile boolean retired;
+    // A DOWN_ERROR that reached this handler before its session was published. The publication reads it (A63).
+    volatile boolean failedBeforePublication;
 
     public PooledSessionEventHandler(SolaceConnection pooled) {
         this.lc = pooled.lc;
@@ -91,6 +96,21 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
         guard = null;
     }
 
+    void retire() {
+        retired = true;
+    }
+
+    // The holder of the current session alone writes its failed flag, under the holder's publication monitor (A63).
+    private boolean markHolderFailed() {
+        if (pooled != null) {
+            return pooled.markFailed(this);
+        }
+        if (requestReply != null) {
+            return lc.markReplyFailed(requestReply);
+        }
+        return lc.markPollFailed(poll);
+    }
+
     // The failed flag of the holder this handler was built for.
     private boolean holderFailed() {
         if (pooled != null) {
@@ -104,6 +124,11 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
 
     @Override
     public boolean preReconnect() {
+        if (retired) {
+            log.warn("SolaceConnector [" + lc.name + "] session " + sessionId
+                    + " reconnect refused: the session is failed or retired, it stays down for the closer");
+            return false;
+        }
         if (lc.orphaned()) {
             // The library was replaced, so no caller can reach this connection again (A48).
             lc.retireOrphan();
@@ -131,6 +156,13 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
     @Override
     public void handleEvent(SessionEventArgs event) {
         SessionEvent sessionEvent = event.getEvent();
+        if (retired) {
+            if (log.isDebugEnabled()) {
+                log.debug("SolaceConnector [" + lc.name + "] session " + sessionId + " event " + sessionEvent
+                        + " after its retirement ignored: " + event.getInfo());
+            }
+            return;
+        }
         if (sessionEvent == SessionEvent.RECONNECTING) {
             JCSMPSession reconnecting = session;
             if (lc.tokenSource != null && reconnecting != null) {
@@ -145,14 +177,9 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
         } else if (sessionEvent == SessionEvent.RECONNECTED) {
             log.info("SolaceConnector [" + lc.name + "] session " + sessionId + " reconnected");
         } else if (sessionEvent == SessionEvent.DOWN_ERROR) {
-            if (pooled != null) {
-                pooled.failed = true;
-            }
-            if (requestReply != null) {
-                requestReply.failed = true;
-            }
-            if (poll != null) {
-                poll.failed = true;
+            if (!markHolderFailed()) {
+                // Not the published session: a candidate that went down before its publication (A63).
+                failedBeforePublication = true;
             }
             log.error("SolaceConnector [" + lc.name + "] session " + sessionId + " DOWN: " + event.getInfo()
                     + ", responseCode=" + event.getResponseCode()

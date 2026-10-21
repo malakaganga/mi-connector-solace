@@ -131,11 +131,12 @@ public final class SessionPublisher {
                         "deadline passed before send() (" + op.id + ")");
             }
             if (!op.enterStage(PublishOperation.Stage.SENDING)) {
-                // The recheck after the lock and the SENDING mark are one step under the record's monitor, so no
-                // send starts after an expiry that left the session alone. Still safe, nothing was sent (A51).
+                // The recheck after the lock and the SENDING mark are one step under the record's monitor, with the
+                // absolute deadline read in the same step, so no send starts after an expiry or a spent budget that
+                // left the session alone. Still safe, nothing was sent (A51, A67).
                 producerLock.unlock();
                 throw new SolaceFault(FAULT_DEADLINE_BEFORE_SEND, ERROR_CODE_DEADLINE_BEFORE_SEND,
-                        "expired while waiting for the producer lock (" + op.id + ")");
+                        "deadline passed before send() (" + op.id + ")");
             }
             boolean holdThroughConfirm = false;
             try {

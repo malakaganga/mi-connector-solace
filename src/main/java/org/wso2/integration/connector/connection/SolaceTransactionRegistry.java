@@ -29,6 +29,10 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.wso2.integration.connector.SolaceFault;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_CONNECTION_ERROR;
 
 /**
  * Tracks active transactional connections by transaction id, with an auto-rollback
@@ -64,15 +68,33 @@ public final class SolaceTransactionRegistry {
         return watchdog;
     }
 
-    /** Creates the entry, its executor and its thread (guide 3.7). The entry is attached to the logical connection. */
-    public static Entry register(SolaceConnection connection, String connectionName, long timeoutMillis) {
+    /**
+     * Creates the entry, its executor and its thread (guide 3.7). The entry is attached to the logical connection.
+     * One protocol under the registry's lock, which shutdown() takes too: the entry enters the map, the timeout is
+     * scheduled, the owner starts, so a timeout that fires always finds its entry. A scheduling or start failure
+     * removes the entry, releases its attachment, stops its executor and faults the begin with the cause (A68).
+     */
+    public static synchronized Entry register(SolaceConnection connection, String connectionName, long timeoutMillis)
+            throws SolaceFault {
         String txId = UUID.randomUUID().toString();
         Entry entry = new Entry(connection, connectionName, txId);
         connection.lc.attach(entry);
-        entry.timeoutFuture = watchdog().schedule(() -> autoRollback(txId),
-                timeoutMillis, TimeUnit.MILLISECONDS);
         entries.put(txId, entry);
-        entry.executor.start();
+        try {
+            entry.timeoutFuture = watchdog().schedule(() -> autoRollback(txId),
+                    timeoutMillis, TimeUnit.MILLISECONDS);
+            entry.executor.start();
+        } catch (RuntimeException e) {
+            entries.remove(txId);
+            if (entry.timeoutFuture != null) {
+                entry.timeoutFuture.cancel(false);
+            }
+            entry.executor.closeAdmission();
+            entry.executor.finished = true;
+            connection.lc.detach(entry);
+            throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                    "transaction registration failed on connection " + connection.getConnectionId() + ": " + e, e);
+        }
         log.info("TransactionRegistry: registered txId=" + txId + " (connectionName=" + connectionName
                 + ", connectionId=" + connection.getConnectionId() + ", timeoutMillis=" + timeoutMillis
                 + ", activeCount=" + entries.size() + ")");

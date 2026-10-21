@@ -24,8 +24,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 /**
- * The flow event handler of a poll flow (guide 3.5). A FLOW_DOWN or a FLOW_RECONNECTING submits the owner's close,
- * every other event is logged at DEBUG. It runs on the JCSMP Context thread and only submits.
+ * The flow event handler of a poll flow (guide 3.5). A FLOW_DOWN or a FLOW_RECONNECTING invalidates the owner and
+ * submits its close, every other event is logged at DEBUG. It runs on the JCSMP Context thread and only submits.
  */
 public final class PollFlowEventHandler implements FlowEventHandler {
 
@@ -41,12 +41,15 @@ public final class PollFlowEventHandler implements FlowEventHandler {
     public void handleEvent(Object source, FlowEventArgs event) {
         FlowEvent flowEvent = event.getEvent();
         if (flowEvent == FlowEvent.FLOW_DOWN) {
+            // Invalidated before the close is queued, so a message the owner receives meanwhile is never exposed (A66).
+            owner.invalidated = true;
             owner.submitClose("flow down");
             return;
         }
         if (flowEvent == FlowEvent.FLOW_RECONNECTING) {
             // The flow closes with its buffer, so a message JCSMP buffered before the rebind is never handed to a
             // poll beside the broker's own redelivery. The A44 rule of the inbound, applied to the poll owner (A54).
+            owner.invalidated = true;
             owner.submitClose("flow reconnecting");
             return;
         }
