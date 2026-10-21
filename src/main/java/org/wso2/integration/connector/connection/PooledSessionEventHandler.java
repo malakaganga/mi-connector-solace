@@ -30,11 +30,11 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 /**
- * The session event handler of every connector session (guide 3.3). DOWN_ERROR marks the owning session
+ * The session event handler of every connector session. DOWN_ERROR marks the owning session
  * failed so its next user rebuilds it. RECONNECTING refreshes the OAuth2 token from the file, as the inbound does.
  * It also answers the reconnect question of JCSMP through a guard consumer registered at connect. A session whose
- * holder is failed or retired refuses its own reconnect (A45). A session of an orphaned logical connection refuses
- * it too and retires the connection (A48).
+ * holder is failed or retired refuses its own reconnect. A session of an orphaned logical connection refuses
+ * it too and retires the connection.
  */
 public final class PooledSessionEventHandler implements SessionEventHandler, JCSMPReconnectEventHandler {
 
@@ -50,10 +50,8 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
     // Never started and without a subscription. It only carries this handler to JCSMP.
     private volatile XMLMessageConsumer guard;
     // Set by the holder when this session is replaced, before the old close is queued and before the publication.
-    // A retired handler changes no holder state (A63).
+    // A retired handler changes no holder state.
     volatile boolean retired;
-    // A DOWN_ERROR that reached this handler before its session was published. The publication reads it (A63).
-    volatile boolean failedBeforePublication;
 
     public PooledSessionEventHandler(SolaceConnection pooled) {
         this.lc = pooled.lc;
@@ -100,15 +98,17 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
         retired = true;
     }
 
-    // The holder of the current session alone writes its failed flag, under the holder's publication monitor (A63).
-    private boolean markHolderFailed() {
+    // One transition under the holder's monitor classifies and records the failure: a retired handler changes
+    // nothing, the installed session's handler fails the holder, a reserved candidate's handler records it on the
+    // reservation for the publication to read.
+    private void reportDown() {
         if (pooled != null) {
-            return pooled.markFailed(this);
+            pooled.reportDown(this);
+        } else if (requestReply != null) {
+            lc.reportReplyDown(this);
+        } else {
+            lc.reportPollDown(this);
         }
-        if (requestReply != null) {
-            return lc.markReplyFailed(requestReply);
-        }
-        return lc.markPollFailed(poll);
     }
 
     // The failed flag of the holder this handler was built for.
@@ -130,7 +130,7 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
             return false;
         }
         if (lc.orphaned()) {
-            // The library was replaced, so no caller can reach this connection again (A48).
+            // The library was replaced, so no caller can reach this connection again.
             lc.retireOrphan();
             return false;
         }
@@ -177,10 +177,7 @@ public final class PooledSessionEventHandler implements SessionEventHandler, JCS
         } else if (sessionEvent == SessionEvent.RECONNECTED) {
             log.info("SolaceConnector [" + lc.name + "] session " + sessionId + " reconnected");
         } else if (sessionEvent == SessionEvent.DOWN_ERROR) {
-            if (!markHolderFailed()) {
-                // Not the published session: a candidate that went down before its publication (A63).
-                failedBeforePublication = true;
-            }
+            reportDown();
             log.error("SolaceConnector [" + lc.name + "] session " + sessionId + " DOWN: " + event.getInfo()
                     + ", responseCode=" + event.getResponseCode()
                     + ", exception=" + event.getException());

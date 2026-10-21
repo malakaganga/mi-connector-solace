@@ -28,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * The static registry of logical connections by connection name (guide 3.3).
+ * The static registry of logical connections by connection name.
  */
 public final class LogicalConnections {
 
@@ -67,7 +67,7 @@ public final class LogicalConnections {
 
     /**
      * Removes and closes only when the mapped instance is expected, so a stale check never removes a replacement.
-     * The close is submitted to the closer, because the caller is the watchdog thread (G12).
+     * The close is submitted to the closer, because the caller is the watchdog thread.
      */
     public static void remove(String name, SolaceLogicalConnection expected) {
         if (!byName.remove(name, expected)) {

@@ -66,7 +66,7 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
                     SolaceConstants.DEFAULT_BROWSE_TIMEOUT_MS, SolaceConstants.BROWSE_TIMEOUT);
 
             connection = (SolaceConnection) handler.getConnection(SolaceConstants.CONNECTOR_NAME, connectionName);
-            // The first call after the borrow: connects the holder on first use, or rebuilds it (guide 3.3).
+            // The first call after the borrow: connects the holder on first use, or rebuilds it.
             connection.ensureSession(System.currentTimeMillis() + timeout);
             if (connection == null || !connection.isConnected()) {
                 handleException("Solace connection is not available or not connected.", messageContext);

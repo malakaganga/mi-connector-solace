@@ -28,11 +28,11 @@ import java.security.NoSuchAlgorithmException;
 
 /**
  * Deterministic client names for the connector's sessions. The connector's copy of the inbound endpoint's class.
- * A rebuilt session reuses its predecessor's name so the broker evicts the zombie (design 8.1).
+ * A rebuilt session reuses its predecessor's name so the broker evicts the zombie.
  */
 public final class ClientNames {
 
-    // Solace limits the client name in bytes, not in characters (G3).
+    // Solace limits the client name in bytes, not in characters.
     public static final int MAX_CLIENT_NAME_BYTES = 160;
 
     private static final int HASH_HEX_LENGTH = 8;
@@ -86,7 +86,7 @@ public final class ClientNames {
 
     /**
      * Strict mode gives pooled session 1 the prefix verbatim and every other role the prefix plus the role,
-     * because a pool cannot share one verbatim name (G9). A blank strict prefix leaves the name to JCSMP.
+     * because a pool cannot share one verbatim name. A blank strict prefix leaves the name to JCSMP.
      */
     public static String connector(String prefix, String nodeId, String connectionName, String role, boolean strict) {
         if (strict) {

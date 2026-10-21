@@ -71,7 +71,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POL
  * (accessible via {@code ${vars.X.attributes.messageId}}) and as legacy
  * {@code solace.*} message-context properties.
  *
- * <p>Settlement in 2.0.0 (guide 3.5, design 7.10). Outside a transaction the poll runs on a cached flow owned by
+ * <p>Settlement in 2.0.0. Outside a transaction the poll runs on a cached flow owned by
  * one thread per queue and selector. With ackMode=AUTO the owner acknowledges the message right after it handed
  * the message to this call, at most once. With ackMode=CLIENT the owner's lease is stashed under
  * solace.poll.message and the sequence settles it with acknowledgeMessage or nackMessage and target=POLL before
@@ -102,7 +102,7 @@ public class SolacePollMessage extends AbstractConnectorOperation {
                     + ", connectionName=" + connectionName);
         }
 
-        // D22: a poll inside an inbound owned transaction has no defined settlement.
+        // A poll inside an inbound owned transaction has no defined settlement.
         if (messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_TX) instanceof Executor) {
             fault(FAULT_INBOUND_TRANSACTION, ERROR_CODE_INBOUND_TRANSACTION,
                     "poll is not supported inside an inbound-owned transaction (D22)", null, messageContext);
@@ -129,7 +129,7 @@ public class SolacePollMessage extends AbstractConnectorOperation {
         }
 
         if (isTransactional) {
-            // Connector owned (3.7): the 1.0.1 transacted poll, now always on the transaction's executor thread.
+            // Connector owned: the 1.0.1 transacted poll, now always on the transaction's executor thread.
             final SolaceTransactionRegistry.Entry entry = SolaceTransactionRegistry.get(txId);
             if (entry == null) {
                 log.error("solace.poll: txId=" + txId + " not found in TransactionRegistry");
@@ -167,7 +167,7 @@ public class SolacePollMessage extends AbstractConnectorOperation {
                     "ackMode must be AUTO or CLIENT, got '" + ackModeRaw + "'", null, messageContext);
             return;
         }
-        // Before any receive: a second CLIENT poll while a polled message is still unsettled (D16).
+        // Before any receive: a second CLIENT poll while a polled message is still unsettled.
         Object stashed = messageContext.getProperty(SolaceConstants.SOLACE_POLL_MESSAGE);
         if (ACK_MODE_CLIENT.equals(ackMode) && stashed instanceof PollLease
                 && ((PollLease) stashed).state == PollLease.OUTSTANDING) {
@@ -193,7 +193,7 @@ public class SolacePollMessage extends AbstractConnectorOperation {
         // No pooled connection is borrowed on this path.
         PollRequest request = null;
         try {
-            // The phase A record of the poll timeout. It bounds the poll session's first connect only (3.3) and
+            // The phase A record of the poll timeout. It bounds the poll session's first connect only and
             // faults CONNECTION_ERROR at once on a closed connection.
             PublishOperation setup = PublishOperation.register(lc, timeout);
             PollSession pollSession;
@@ -208,7 +208,7 @@ public class SolacePollMessage extends AbstractConnectorOperation {
             // May fault POLL_FLOW_LIMIT or INVALID_CONFIG. Binds on this thread.
             PollFlowOwner owner = pollSession.ownerFor(queueName, selector);
             request = new PollRequest(System.currentTimeMillis() + timeout, ackMode);
-            // The timeout covers the wait for the owner's turn as well as the receive (8.2).
+            // The timeout covers the wait for the owner's turn as well as the receive.
             owner.submit(request);
             BytesXMLMessage message;
             PollLease lease;
@@ -238,7 +238,7 @@ public class SolacePollMessage extends AbstractConnectorOperation {
         } catch (SolaceFault fault) {
             fault(fault, messageContext, responseVariable);
         } catch (InterruptedException e) {
-            // D24: the wait on the request is interruptible. The interrupt is the caller's expiry: the request is
+            // The wait on the request is interruptible. The interrupt is the caller's expiry: the request is
             // marked EXPIRED under its monitor so the owner never delivers to it, and the flag is re asserted.
             Thread.currentThread().interrupt();
             if (request != null) {

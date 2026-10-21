@@ -35,7 +35,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_TRA
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_UNKNOWN;
 
 /**
- * Submits a command to a transaction owner and waits for its result (guide 3.7). The owner is the inbound
+ * Submits a command to a transaction owner and waits for its result. The owner is the inbound
  * endpoint's command queue of an inbound owned transaction or the TransactionExecutor of a connector owned one.
  * Every operation that runs inside a transaction goes through this one helper, so the fault mapping is the same
  * on both sides of the bridge.

@@ -57,7 +57,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POL
  *
  * <p>In 2.0.0 the default target INBOUND completes the inbound endpoint's settlement handle when one is present,
  * and falls back to the direct settle above for inbound 1.x. The target POLL settles the message a poll with
- * ackMode=CLIENT stashed, on its flow owner thread (guide 3.2, design 7.4).</p>
+ * ackMode=CLIENT stashed, on its flow owner thread.</p>
  */
 public class SolaceNackMessage extends AbstractConnectorOperation {
     private static final Log log = LogFactory.getLog(SolaceNackMessage.class);
@@ -96,7 +96,7 @@ public class SolaceNackMessage extends AbstractConnectorOperation {
             }
             PollLease lease = (PollLease) stashed;
             try {
-                // Runs on the flow's owner thread. The caller waits at most OWNER_CALL_TIMEOUT_MS (3.5).
+                // Runs on the flow's owner thread. The caller waits at most OWNER_CALL_TIMEOUT_MS.
                 result = lease.owner.settle(lease, outcome);
             } catch (SolaceFault fault) {
                 // POLL_ERROR, UNKNOWN or a JCSMP failure: the stash is kept. A later poll consults the lease's own

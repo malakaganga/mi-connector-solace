@@ -58,7 +58,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_UNK
 
 /**
  * The producer lock, the pending acknowledgements and the deadline bounded send algorithm of one session
- * (guide 3.4). One per pooled SolaceConnection and one per RequestReplySession, rebuilt with the session.
+ *. One per pooled SolaceConnection and one per RequestReplySession, rebuilt with the session.
  */
 public final class SessionPublisher {
 
@@ -71,7 +71,7 @@ public final class SessionPublisher {
     volatile XMLMessageProducer producer;
     // Covers send() only above a publisher window of 1. At the default window of 1 it is held through the
     // confirmation wait, because JCSMP serialises the sends there anyway and a thread must not be cut inside
-    // send() (design 7.10, A59).
+    // send().
     final ReentrantLock producerLock = new ReentrantLock();
     final ConcurrentMap<String, CompletableFuture<Void>> pendingAcks = new ConcurrentHashMap<>();
     private final PublishEventHandler eventHandler = new PublishEventHandler();
@@ -133,7 +133,7 @@ public final class SessionPublisher {
             if (!op.enterStage(PublishOperation.Stage.SENDING)) {
                 // The recheck after the lock and the SENDING mark are one step under the record's monitor, with the
                 // absolute deadline read in the same step, so no send starts after an expiry or a spent budget that
-                // left the session alone. Still safe, nothing was sent (A51, A67).
+                // left the session alone. Still safe, nothing was sent.
                 producerLock.unlock();
                 throw new SolaceFault(FAULT_DEADLINE_BEFORE_SEND, ERROR_CODE_DEADLINE_BEFORE_SEND,
                         "deadline passed before send() (" + op.id + ")");
@@ -148,8 +148,8 @@ public final class SessionPublisher {
                 }
                 op.enterStage(PublishOperation.Stage.SENT);
                 // At window 1 the lock is held through the confirmation wait, so a send never blocks inside JCSMP
-                // on window space and every wait under contention is the lock wait that A51 made safe (A59).
-                // Above 1 the hold is the T32 regression toggle only.
+                // on window space and every wait under contention is the safe, timed lock wait.
+                // Above 1 the hold is a test toggle only.
                 holdThroughConfirm = future != null
                         && (lc.settings.pubAckWindowSize == 1
                                 || Boolean.TRUE.equals(Hooks.get().point("publisher.holdLockThroughConfirm")));
@@ -216,7 +216,7 @@ public final class SessionPublisher {
         } catch (SolaceFault fault) {
             throw fault;
         } catch (InterruptedException e) {
-            // Only tryLock reaches here. Nothing was sent and the flag is re asserted (guide 0.6 rule 10).
+            // Only tryLock reaches here. Nothing was sent and the flag is re asserted.
             Thread.currentThread().interrupt();
             op.fail();
             throw new SolaceFault(FAULT_PUBLISH_ERROR, ERROR_CODE_PUBLISH_ERROR,

@@ -35,7 +35,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.SOLACE_ME
 
 /**
  * Completion of the inbound endpoint's settlement handle and the shared result reporting of the settlement
- * operations (guide 3.2, design 7.4). The value functions are the connector's copy of the inbound's
+ * operations. The value functions are the connector's copy of the inbound's
  * SettlementValues. The string format of the handle value is the contract between the two bundles: an operation
  * writes ACK, FAILED or REJECTED, the inbound writes its cause followed by a colon and the decision time in
  * milliseconds.
@@ -62,7 +62,7 @@ public final class HandleCompletion {
         }
         @SuppressWarnings("unchecked")
         CompletableFuture<String> handle = (CompletableFuture<String>) stashed;
-        // Transacted deliveries only: the only handles with a measurement record (C.5).
+        // Transacted deliveries only: the only handles with a measurement record.
         boolean transacted = ctx.getProperty(SOLACE_INBOUND_TX) instanceof Executor;
         // Test build: this attempt's instant, taken immediately before its complete() call. Shipped: null, no
         // clock read.

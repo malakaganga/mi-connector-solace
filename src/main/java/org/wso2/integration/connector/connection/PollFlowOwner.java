@@ -59,7 +59,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.REASON_AL
 import static org.wso2.integration.connector.constants.SolaceConstants.REASON_STALE_DELIVERY;
 
 /**
- * One cached poll flow and the one thread that touches it (guide 3.5, design 7.10). Every receive, settle, expiry
+ * One cached poll flow and the one thread that touches it. Every receive, settle, expiry
  * and close of the flow runs on this owner thread. Callers hand in PollRequest and OwnerCommand objects through
  * the inbox and wait on them. The owner is an attached owner of the logical connection from its constructor to
  * closeNow() or discard().
@@ -92,8 +92,9 @@ public final class PollFlowOwner implements Runnable {
     private int liveLeaseCount = 0;
     volatile long lastUsedAt = System.currentTimeMillis();
     volatile boolean closed = false;
-    // Set by the flow event handler on FLOW_RECONNECTING and FLOW_DOWN before it queues the close, reset at bind:
-    // a message received after it is never leased, exposed or acknowledged (A66).
+    // Set by the flow event handler on FLOW_RECONNECTING and FLOW_DOWN before it queues the close, under state, reset
+    // at bind: a message received after it is never leased, exposed or acknowledged. The hand off reads it
+    // under state too, so invalidation and the hand off have one order.
     volatile boolean invalidated = false;
     private ScheduledFuture<?> idleTimer;
 
@@ -104,8 +105,20 @@ public final class PollFlowOwner implements Runnable {
         this.queue = queue;
         this.selector = selector;
         this.generation = ps.generation;
-        // Inside a published PollSession the count is at least 1, so this attach cannot fail (3.3).
+        // Inside a published PollSession the count is at least 1, so this attach cannot fail.
         lc.attach(this);
+    }
+
+    /**
+     * The flow event handler's thread. Takes only the state monitor, never a request monitor, and does no broker
+     * work: invalidated, and admission stopped, so ownerFor binds a fresh flow and a settle reports STALE_DELIVERY.
+     * The close command is queued by the caller afterwards.
+     */
+    void invalidate() {
+        synchronized (state) {
+            invalidated = true;
+            closing = true;
+        }
     }
 
     /** ownerFor: the caller is counted from here until finishRequest(). */
@@ -163,13 +176,13 @@ public final class PollFlowOwner implements Runnable {
         flowProperties.setEndpoint(JCSMPFactory.onlyInstance().createQueue(queue));
         flowProperties.setStartState(true);
         // Client acknowledgement always. AUTO is the owner's own acknowledgement after the hand off. A window of 1
-        // bounds the prefetch an idle flow retains (T24-I).
+        // bounds the prefetch an idle flow retains.
         flowProperties.setAckMode(JCSMPProperties.SUPPORTED_MESSAGE_ACK_CLIENT);
         flowProperties.setTransportWindowSize(1);
         if (selector != null) {
             flowProperties.setSelector(selector);
         }
-        // The session's negotiation, the 1.6 algorithm against requireSettlementOutcomes.
+        // The session's negotiation, the outcome negotiation against requireSettlementOutcomes.
         List<XMLMessage.Outcome> requiredOutcomes = new ArrayList<>();
         if (ps.failedSupported) {
             requiredOutcomes.add(XMLMessage.Outcome.FAILED);
@@ -182,8 +195,8 @@ public final class PollFlowOwner implements Runnable {
         }
         EndpointProperties endpointProperties = new EndpointProperties();
         endpointProperties.setAccessType(EndpointProperties.ACCESSTYPE_NONEXCLUSIVE);
-        // Null listener: synchronous receive on this owner (Appendix A row 6). A FLOW_DOWN or a FLOW_RECONNECTING
-        // submits the owner's close, every other event is DEBUG (A54).
+        // Null listener: synchronous receive on this owner. A FLOW_DOWN or a FLOW_RECONNECTING
+        // submits the owner's close, every other event is DEBUG.
         flow = ps.session.createFlow(null, flowProperties, endpointProperties, new PollFlowEventHandler(this));
     }
 
@@ -232,12 +245,12 @@ public final class PollFlowOwner implements Runnable {
                 Thread.currentThread().interrupt();
                 closeNow("interrupted");
             } catch (RuntimeException e) {
-                // 0.6 rule 10: the owner's terminal cleanup. A failure in any step must not leave an attached owner
+                // The owner's terminal cleanup. A failure in any step must not leave an attached owner
                 // with live leases and a queued close that no thread will run.
                 log.error("SolaceConnector [" + lc.name + "] poll flow " + queue + " owner failed; closing the flow", e);
                 closeNow("owner failed: " + e);
             } catch (Error e) {
-                // 0.6 rule 10: accounting, then rethrow.
+                // Accounting, then rethrow.
                 closeNow("owner died: " + e);
                 throw e;
             }
@@ -253,7 +266,7 @@ public final class PollFlowOwner implements Runnable {
                 expire(request);
                 return;
             }
-            // One slice. A settle or an expiry waits at most one slice behind an empty receive (design 7.10).
+            // One slice. A settle or an expiry waits at most one slice behind an empty receive.
             BytesXMLMessage message = flow.receive((int) Math.min(POLL_SLICE_MS, remaining));
             if (message == null) {
                 // Between slices the settle, expiry, idle and close commands run. New requests queue behind this one.
@@ -268,7 +281,7 @@ public final class PollFlowOwner implements Runnable {
             if (invalidated) {
                 // The flow left the connected state: the message is not leased, not exposed and not acknowledged,
                 // the flow close returns it to the broker. The request is answered as a close between slices
-                // answers it, and the queued close runs next (A66).
+                // answers it, and the queued close runs next.
                 expire(request);
                 return;
             }
@@ -283,7 +296,7 @@ public final class PollFlowOwner implements Runnable {
             boolean client = ACK_MODE_CLIENT.equals(request.ackMode);
             if (client) {
                 // The watchdog only submits. The expiry runs on this thread. The watchdog is alive while this owner
-                // is attached (3.3), so schedule() cannot reject here or in armIdleTimer().
+                // is attached, so schedule() cannot reject here or in armIdleTimer().
                 lease.timer = lc.watchdog.schedule(
                         () -> submit(OwnerCommand.of(() -> {
                             expireLease(lease);
@@ -293,9 +306,15 @@ public final class PollFlowOwner implements Runnable {
             }
             Hooks.get().point("poll.beforeHandoff", this, request);
             boolean handed;
-            // One atomic hand off: result and lease together, or nothing.
+            boolean flowGone;
+            // One atomic hand off: result and lease together, or nothing. The order is the request monitor, then the
+            // state monitor, so an invalidation and this decision are serialised: if the invalidation won, nothing
+            // is exposed. No broker call inside.
             synchronized (request) {
-                handed = request.state == PollRequest.QUEUED;
+                synchronized (state) {
+                    flowGone = invalidated || closing || closed;
+                }
+                handed = !flowGone && request.state == PollRequest.QUEUED;
                 if (handed) {
                     request.state = PollRequest.DONE;
                     request.result = message;
@@ -305,6 +324,14 @@ public final class PollFlowOwner implements Runnable {
                     request.notifyAll();
                 }
             }
+            if (flowGone) {
+                // The invalidation won: the provisional lease ends here once, its timer cancelled, the message is
+                // neither exposed nor acknowledged and the flow close returns it to the broker. The caller wakes with
+                // nothing, as on a close between slices.
+                terminalise(lease, PollLease.STALE);
+                expire(request);
+                return;
+            }
             if (handed) {
                 // AUTO: acknowledged on the owner right after the hand off. A JCSMPException propagates to run(),
                 // which closes the flow.
@@ -313,7 +340,7 @@ public final class PollFlowOwner implements Runnable {
                 }
                 return;
             }
-            // The caller expired meanwhile: never deliver to it (T24-M, G15).
+            // The caller expired meanwhile: never deliver to it.
             lc.counters.pollLateReceive.increment();
             log.warn("SolaceConnector [" + lc.name + "] polled message " + message.getMessageId()
                     + " received after its caller's timeout on flow " + queue + "; settling FAILED");
@@ -360,7 +387,7 @@ public final class PollFlowOwner implements Runnable {
         }
     }
 
-    /** An expired queued request never consumes. It is finished here (T24-L). */
+    /** An expired queued request never consumes. It is finished here. */
     private PollRequest nextQueued() {
         PollRequest request;
         while ((request = requests.pollFirst()) != null) {
@@ -389,7 +416,7 @@ public final class PollFlowOwner implements Runnable {
         try {
             return command.get(waitMillis, MILLISECONDS);
         } catch (TimeoutException | InterruptedException e) {
-            // The same rule for a timeout and an interrupt (G7).
+            // The same rule for a timeout and an interrupt.
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
@@ -411,7 +438,7 @@ public final class PollFlowOwner implements Runnable {
             throw new SolaceFault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,
                     "poll flow " + queue + " closed before the command ran");
         } catch (ExecutionException e) {
-            // A JCSMPException thrown by settleOnOwner (3.2).
+            // A JCSMPException thrown by settleOnOwner.
             throw new SolaceFault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR, e.getCause().getMessage(), e.getCause(),
                     false);
         }
@@ -424,15 +451,17 @@ public final class PollFlowOwner implements Runnable {
                 inbox.offer(item);
                 return;
             }
-            // The command's caller reports POLL_ERROR "closed before the command ran".
-            if (item instanceof Future) {
-                ((Future<?>) item).cancel(false);
-            }
-            // Accepted by ownerFor, refused here: the caller wakes with nothing and its busy count is released.
-            if (item instanceof PollRequest) {
-                expire((PollRequest) item);
-                finishRequest();
-            }
+        }
+        // Outside the state monitor: the hand off takes a request monitor and then state, so nothing here may take
+        // state and then a request monitor.
+        // The command's caller reports POLL_ERROR "closed before the command ran".
+        if (item instanceof Future) {
+            ((Future<?>) item).cancel(false);
+        }
+        // Accepted by ownerFor, refused here: the caller wakes with nothing and its busy count is released.
+        if (item instanceof PollRequest) {
+            expire((PollRequest) item);
+            finishRequest();
         }
     }
 
@@ -457,7 +486,7 @@ public final class PollFlowOwner implements Runnable {
             return call(() -> settleOnOwner(lease, outcome, "settled by operation"), lease, OWNER_CALL_TIMEOUT_MS);
         } catch (SolaceFault fault) {
             // A close that landed between the checks above and the command, refused or cancelled before it ran, is
-            // the "flow already gone" case of 3.2: STALE_DELIVERY, not a fault. UNKNOWN and a JCSMP failure stay
+            // the "flow already gone" case: STALE_DELIVERY, not a fault. UNKNOWN and a JCSMP failure stay
             // faults.
             if (FAULT_POLL_ERROR.equals(fault.name) && gone(lease)) {
                 return stale(lease, outcomeName);
@@ -467,7 +496,7 @@ public final class PollFlowOwner implements Runnable {
     }
 
     private boolean gone(PollLease lease) {
-        return closed || ps.retired || lease.state == PollLease.STALE;
+        return closed || invalidated || ps.retired || lease.state == PollLease.STALE;
     }
 
     private SettlementResult stale(PollLease lease, String outcomeName) {
@@ -478,7 +507,7 @@ public final class PollFlowOwner implements Runnable {
 
     /**
      * Owner thread only. There is no caller gone branch: the broker action completes whether or not the caller is
-     * still waiting (G7).
+     * still waiting.
      */
     private SettlementResult settleOnOwner(PollLease lease, XMLMessage.Outcome outcome, String why)
             throws JCSMPException {
@@ -487,7 +516,7 @@ public final class PollFlowOwner implements Runnable {
         if (lease.state == PollLease.STALE) {
             return SettlementResult.notSettled(outcomeName, REASON_STALE_DELIVERY, -1);
         }
-        // Settled or expired first: one winner (T24-E).
+        // Settled or expired first: one winner.
         if (lease.state != PollLease.OUTSTANDING) {
             return SettlementResult.notSettled(outcomeName, REASON_ALREADY_DECIDED, -1);
         }
@@ -509,7 +538,7 @@ public final class PollFlowOwner implements Runnable {
         } catch (JCSMPException e) {
             log.error("SolaceConnector [" + lc.name + "] settling polled message " + lease.message.getMessageId() + " "
                     + outcomeName + " failed on flow " + queue + ": " + e.getMessage());
-            // The flow is recycled so the broker redelivers. The caller faults POLL_ERROR 700108 (3.2). A caller
+            // The flow is recycled so the broker redelivers. The caller faults POLL_ERROR 700108. A caller
             // that already left sees the orphaned result WARN.
             terminalise(lease, PollLease.EXPIRED);
             closeNow("settle failed: " + e.getMessage());
@@ -533,13 +562,13 @@ public final class PollFlowOwner implements Runnable {
 
     /** Owner thread, submitted by the watchdog timer. */
     private void expireLease(PollLease lease) {
-        // Settled or dropped first: one winner (T24-E).
+        // Settled or dropped first: one winner.
         if (lease.state != PollLease.OUTSTANDING) {
             return;
         }
         lc.counters.pollLeaseExpired.increment();
         if (!ps.failedSupported) {
-            // T24 F. The line names the outcome that happens here (A56).
+            // The line names the outcome that happens here.
             log.warn("SolaceConnector [" + lc.name + "] polled message " + lease.message.getMessageId()
                     + " was not settled within pollAckTimeout " + lc.settings.pollAckTimeoutMillis
                     + " ms; retained (no FAILED support), the flow is recycled");
@@ -645,7 +674,7 @@ public final class PollFlowOwner implements Runnable {
     }
 
     /**
-     * A FutureTask with an atomic execution claim, the poll owner's instance of the 3.7 command shape. The body
+     * A FutureTask with an atomic execution claim, the poll owner's instance of the transaction command shape. The body
      * executes only if it wins the claim, and cancelBeforeRun() is the caller's side of the same claim, so the
      * caller learns exactly whether the body can still run. The broker call stays outside the claim.
      */

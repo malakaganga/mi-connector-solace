@@ -20,7 +20,7 @@ package org.wso2.integration.connector.connection;
 import com.solacesystems.jcsmp.BytesXMLMessage;
 
 /**
- * One poll call waiting for its turn on a flow owner (guide 3.5). The mutable fields are guarded by the request's
+ * One poll call waiting for its turn on a flow owner. The mutable fields are guarded by the request's
  * own monitor, which the owner and the caller share for the one atomic hand off.
  */
 public final class PollRequest {

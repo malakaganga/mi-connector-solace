@@ -57,7 +57,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.REQUIRE_O
 import static org.wso2.integration.connector.constants.SolaceConstants.REQUIRE_SETTLEMENT_OUTCOMES;
 
 /**
- * The 2.0.0 connection parameters of a logical connection, parsed once from the init template (guide 3.3).
+ * The 2.0.0 connection parameters of a logical connection, parsed once from the init template.
  * Parsing follows the inbound endpoint's rule: a default applies only to an absent or blank value, a malformed
  * present value is an error. parse() never throws, it collects every error for SolaceConfigConnector.connect().
  */
@@ -69,7 +69,7 @@ public final class ConnectionSettings {
     public final String requireSettlementOutcomes;
     public final int maxConcurrentRequests;
     // The publisher window of every session, JCSMP's default of 1 unless the connection sets pubAckWindowSize.
-    // At 1 the producer lock is held through the confirmation wait (A59).
+    // At 1 the producer lock is held through the confirmation wait.
     public final int pubAckWindowSize;
     public final long recoveryInitialDelayMillis;
     public final double recoveryProgression;
@@ -99,7 +99,7 @@ public final class ConnectionSettings {
                 MAX_CONCURRENT_REQUESTS, DEFAULT_MAX_CONCURRENT_REQUESTS, collected);
         this.pubAckWindowSize = parseInt(parameter(messageContext, PUB_ACK_WINDOW_SIZE), PUB_ACK_WINDOW_SIZE, 1,
                 collected);
-        // The range checks after the parses. No timer of the connector reads 0 as disabled (A65).
+        // The range checks after the parses. No timer of the connector reads 0 as disabled.
         if (pollAckTimeoutMillis < 1) {
             collected.add(POLL_ACK_TIMEOUT + " must be at least 1, got " + pollAckTimeoutMillis);
         }

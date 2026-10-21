@@ -94,7 +94,7 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
             log.info("solace.publishMessage: txId=" + txId
                     + " resolved to connectionId=" + transactionEntry.connection.getConnectionId());
         }
-        // An inbound owned transaction: the inbound endpoint's worker owns the executor and the producer (3.7).
+        // An inbound owned transaction: the inbound endpoint's worker owns the executor and the producer.
         Object inboundTx = messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_TX);
         boolean inboundOwned = inboundTx instanceof Executor;
 
@@ -162,7 +162,7 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
         // Build optional message properties
         SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext);
 
-        // Publish ACK wait (guaranteed mode only). The default is true for guaranteed delivery (design 8.2).
+        // Publish ACK wait (guaranteed mode only). The default is true for guaranteed delivery.
         String waitForAckStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.WAIT_FOR_ACK);
         boolean waitForAck = StringUtils.isEmpty(waitForAckStr) ? true : Boolean.parseBoolean(waitForAckStr);
@@ -185,7 +185,7 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
         final String publishMessageType = messageType;
 
         if (isTransactional) {
-            // Connector owned (3.7): the 1.0.1 transacted publish, now always on the transaction's executor thread.
+            // Connector owned: the 1.0.1 transacted publish, now always on the transaction's executor thread.
             final SolaceTransactionRegistry.Entry entry = transactionEntry;
             try {
                 log.debug("solace.publishMessage: txId=" + txId + " sending transacted message to "
@@ -213,7 +213,7 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
         }
 
         if (inboundOwned) {
-            // Inbound owned (3.7): the publish is a command on the inbound endpoint's producer. The result is the
+            // Inbound owned: the publish is a command on the inbound endpoint's producer. The result is the
             // commit's, so the ack status is TX_PENDING.
             final XMLMessageProducer producer = (XMLMessageProducer) messageContext.getProperty(
                     SolaceConstants.SOLACE_INBOUND_TX_PRODUCER);
@@ -263,14 +263,14 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
             MessageBuilder.applyDeliveryMode(message, deliveryMode);
             MessageBuilder.applyMessageProperties(message, msgProperties);
             Destination destination = MessageBuilder.resolveDestination(destinationType, destinationName);
-            // Bounded by the pool's maxWaitTime (A1).
+            // Bounded by the pool's maxWaitTime.
             connection = (SolaceConnection) handler.getConnection(SolaceConstants.CONNECTOR_NAME, connectionName);
             if (!op.attach(connection)) {
                 // A refused session was never used.
                 throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
                         "deadline passed while waiting for a pooled session", null, false);
             }
-            // Connects the holder on first use (3.3), or rebuilds it. Bounded by the record's deadline.
+            // Connects the holder on first use, or rebuilds it. Bounded by the record's deadline.
             connection.ensureSession(op);
             PublishResult result = connection.publisher.send(op, message, destination, null, waitForAck);
 

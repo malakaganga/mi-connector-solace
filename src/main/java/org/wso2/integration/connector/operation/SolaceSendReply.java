@@ -80,7 +80,7 @@ public class SolaceSendReply extends AbstractConnectorOperation {
             return;
         }
 
-        // A reply inside a transaction is a command on the transaction's thread (3.7): the inbound endpoint's
+        // A reply inside a transaction is a command on the transaction's thread: the inbound endpoint's
         // producer for an inbound owned one, the pinned connection's transacted producer for a connector owned one.
         String txId = (String) ((Axis2MessageContext) messageContext).getAxis2MessageContext()
                 .getProperty(SolaceConstants.TX_CONNECTION_ID);
@@ -90,7 +90,7 @@ public class SolaceSendReply extends AbstractConnectorOperation {
 
         PublishOperation op = null;
         try {
-            // target selects the request message (guide 3.6): INBOUND, the default, is the raw message the inbound
+            // target selects the request message: INBOUND, the default, is the raw message the inbound
             // endpoint stashed, POLL is the message of the lease a poll with ackMode=CLIENT stashed.
             String target = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.TARGET);
             if (StringUtils.isEmpty(target)) {
@@ -163,7 +163,7 @@ public class SolaceSendReply extends AbstractConnectorOperation {
             // Build optional message properties
             SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext);
 
-            // The publish acknowledgement of a guaranteed reply, read as publishMessage reads them (design 8.2).
+            // The publish acknowledgement of a guaranteed reply, read as publishMessage reads them.
             String waitForAckStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                     SolaceConstants.WAIT_FOR_ACK);
             boolean waitForAck = StringUtils.isEmpty(waitForAckStr) ? true : Boolean.parseBoolean(waitForAckStr);
@@ -221,7 +221,7 @@ public class SolaceSendReply extends AbstractConnectorOperation {
                 }, ackTimeout), "sendReply", FAULT_PUBLISH_ERROR, ERROR_CODE_PUBLISH_ERROR, messageContext);
             } else {
                 // The record first, then the reply session acquired with it: a first connect attaches the candidate
-                // session through the record and takes it over at publication (3.3). No pooled connection is borrowed.
+                // session through the record and takes it over at publication. No pooled connection is borrowed.
                 op = PublishOperation.register(lc, ackTimeout);
                 RequestReplySession rr = lc.requestReplySession(op);
                 op.attach(rr);

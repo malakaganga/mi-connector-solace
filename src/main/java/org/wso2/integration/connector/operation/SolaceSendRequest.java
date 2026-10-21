@@ -140,7 +140,7 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
         // Build optional message properties
         SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext);
 
-        // The publish acknowledgement of a guaranteed request, read as publishMessage reads them (design 8.2).
+        // The publish acknowledgement of a guaranteed request, read as publishMessage reads them.
         String waitForAckStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.WAIT_FOR_ACK);
         boolean waitForAck = StringUtils.isEmpty(waitForAckStr) ? true : Boolean.parseBoolean(waitForAckStr);
@@ -175,7 +175,7 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
         boolean permitHeld = false;
         try {
             // Phase A record, deadline = the request budget. It governs the reply session's first connect only.
-            // The session is transferred out of the record at publication (3.3, 3.4), so it never closes the
+            // The session is transferred out of the record at publication, so it never closes the
             // shared reply session afterwards.
             setup = PublishOperation.registerUntil(lc, requestDeadline);
             rr = lc.requestReplySession(setup);
@@ -239,7 +239,7 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
                 ConsumerFlowProperties flowProperties = new ConsumerFlowProperties();
                 flowProperties.setEndpoint(tempQueue);
                 flowProperties.setStartState(true);
-                // Baseline 415. The flow close in the finally removes the temporary queue (A45).
+                // Baseline 415. The flow close in the finally removes the temporary queue.
                 flow = replySession.createFlow(null, flowProperties);
                 // Phase A ends. The setup never leaves a timer on the shared session.
                 setup.finish();
@@ -381,7 +381,7 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
                 }
             }
             // The flow close is the whole cleanup. The broker removes a temporary queue when its flow closes, and
-            // JCSMP refuses deprovision on a temporary queue (A45).
+            // JCSMP refuses deprovision on a temporary queue.
             if (cleanupFailed) {
                 // Marks the request reply session for rebuild at its next use.
                 lc.counters.cleanupFailures.increment();

@@ -521,7 +521,7 @@ public final class SolaceUtils {
             properties.setProperty(JCSMPProperties.PASSWORD, password);
         }
 
-        // The client name is set per session by the logical connection (guide 3.3), never here.
+        // The client name is set per session by the logical connection, never here.
 
         // Channel properties (timeouts, retries, compression)
         JCSMPChannelProperties channelProps = (JCSMPChannelProperties) properties.getProperty(

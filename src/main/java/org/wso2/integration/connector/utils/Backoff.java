@@ -18,7 +18,7 @@
 package org.wso2.integration.connector.utils;
 
 /**
- * The connector's copy of the inbound endpoint's back off function (design 7.5).
+ * The connector's copy of the inbound endpoint's back off function.
  */
 public final class Backoff {
 

@@ -264,14 +264,14 @@ public final class SolaceConstants {
     public static final int DEFAULT_MAX_POLL_FLOWS = 16;
     public static final int DEFAULT_MAX_CONCURRENT_REQUESTS = 100;
     public static final long POLL_SLICE_MS = 1000L;
-    // Bound of a settle or expiry call into a flow owner: one slice plus the settle round trip (G7).
+    // Bound of a settle or expiry call into a flow owner: one slice plus the settle round trip.
     public static final long OWNER_CALL_TIMEOUT_MS = 7000L;
-    // Bound of a commit or rollback command wait (G10).
+    // Bound of a commit or rollback command wait.
     public static final long TX_COMPLETION_WAIT_MS = 30000L;
-    // Applied when the init template gives no maxWaitTime (G6).
+    // Applied when the init template gives no maxWaitTime.
     public static final String DEFAULT_POOL_MAX_WAIT_MS = "10000";
 
-    // 2.0.0 fault names, the first token of every fault message (guide 0.3)
+    // 2.0.0 fault names, the first token of every fault message
     public static final String FAULT_CONNECTION_ERROR = "CONNECTION_ERROR";
     public static final String FAULT_PUBLISH_ERROR = "PUBLISH_ERROR";
     public static final String FAULT_INVALID_CONFIG = "INVALID_CONFIG";
@@ -293,7 +293,7 @@ public final class SolaceConstants {
     public static final String FAULT_NACK = "NACK";
     public static final String FAULT_ROLLED_BACK = "ROLLED_BACK";
 
-    // 2.0.0 error codes (guide 0.3)
+    // 2.0.0 error codes
     public static final int ERROR_CODE_TRANSACTION_ACTIVE = 700111;
     public static final int ERROR_CODE_TRANSACTION_COMPLETED = 700112;
     public static final int ERROR_CODE_INBOUND_TRANSACTION = 700113;

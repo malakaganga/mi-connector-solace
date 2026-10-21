@@ -21,7 +21,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Every connector thread comes from a named factory (guide 0.1). The connector's copy of the inbound's class.
+ * Every connector thread comes from a named factory. The connector's copy of the inbound's class.
  */
 public final class NamedThreadFactory implements ThreadFactory {
 

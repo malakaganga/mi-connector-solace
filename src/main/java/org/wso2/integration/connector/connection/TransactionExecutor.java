@@ -40,7 +40,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_ROL
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_UNKNOWN;
 
 /**
- * The owner of one connector owned transaction (guide 3.7, design 7.10). It is the connector's copy of the inbound
+ * The owner of one connector owned transaction. It is the connector's copy of the inbound
  * endpoint's owner loop: one daemon thread, one queue of commands, and the same procedure per command. Every
  * access to the transacted session, its producer and its flows happens on this thread. The completion command
  * runs here too, decides commit or rollback from the transaction's state, and releases the pinned holder.
@@ -92,7 +92,7 @@ public final class TransactionExecutor implements Executor {
         }
     }
 
-    /** Owner thread. The same procedure as the inbound's owner loop (2.2), with the terminal flag in place of the handle. */
+    /** Owner thread. The same procedure as the inbound's owner loop, with the terminal flag in place of the handle. */
     void runCommand(Object item) {
         if (!(item instanceof Runnable)) {
             return;
@@ -126,7 +126,7 @@ public final class TransactionExecutor implements Executor {
         }
         if (future != null && future.isCancelled()) {
             // A cancel that lands between the check above and FutureTask.run() ends here too, a spurious rollback in
-            // the safe direction (G4).
+            // the safe direction.
             entry.uncertain = true;
             log.error("solace transaction " + txId
                     + ": a command was cut off while running; the transaction is uncertain and the completion will roll back");
@@ -140,7 +140,7 @@ public final class TransactionExecutor implements Executor {
             try {
                 item = queue.take();
             } catch (InterruptedException e) {
-                // Nobody interrupts the owner (3.7). The flag carries no signal here, so the loop keeps serving, as
+                // Nobody interrupts the owner. The flag carries no signal here, so the loop keeps serving, as
                 // the inbound's owner loop does.
                 continue;
             }
@@ -180,7 +180,7 @@ public final class TransactionExecutor implements Executor {
 
     /**
      * Owner thread. Never cancelled by its caller: the caller's TX_COMPLETION_WAIT_MS bounds its wait only, and the
-     * owner always runs the completion, the pool return and the entry's detach (G10).
+     * owner always runs the completion, the pool return and the entry's detach.
      */
     Void complete(boolean wantCommit) throws SolaceFault {
         // Terminal. Queued commands are cancelled.
@@ -231,7 +231,7 @@ public final class TransactionExecutor implements Executor {
                     entry.connection.failed = true;
                     lc.closeOnCloser(entry.connection.session);
                 }
-                // Exactly one pool release per transaction (3.3).
+                // Exactly one pool release per transaction.
                 entry.connection.returnToPool();
             } catch (RuntimeException e) {
                 log.error("solace transaction " + txId + ": holder release failed", e);

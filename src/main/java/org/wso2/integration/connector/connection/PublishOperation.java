@@ -32,7 +32,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_COD
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_CONNECTION_ERROR;
 
 /**
- * The operation record of a deadline bounded broker interaction (guide 3.4, design 7.10).
+ * The operation record of a deadline bounded broker interaction.
  * Every transition runs under this record's monitor and no broker call happens inside it.
  */
 public final class PublishOperation {
@@ -53,7 +53,7 @@ public final class PublishOperation {
     private RequestReplySession rr;
     // C.5 publish.startToConfirmation
     final long registeredNanos = System.nanoTime();
-    // Guarded by this record's monitor, so expire() reads it in the same step as its own transition (A51).
+    // Guarded by this record's monitor, so expire() reads it in the same step as its own transition.
     private Stage stage = Stage.BEFORE_SEND;
     private ScheduledFuture<?> timer;
 
@@ -100,8 +100,8 @@ public final class PublishOperation {
 
     /**
      * The operation thread moves the stage. Refused once the record is EXPIRED, so no send starts after an expiry
-     * (A51). The claim of SENDING also reads the absolute deadline, so a spent budget never becomes a send when the
-     * watchdog is late (A67).
+     *. The claim of SENDING also reads the absolute deadline, so a spent budget never becomes a send when the
+     * watchdog is late.
      */
     public synchronized boolean enterStage(Stage next) {
         if (state == State.EXPIRED) {
@@ -139,39 +139,31 @@ public final class PublishOperation {
     }
 
     /**
-     * The transfer decision for a dedicated session's first connect and for an attempt record's hand over (3.3).
-     * It is atomic with expire() and with the deadline. True means the record gives the session up before it is
-     * exposed, so a later timer closes nothing. False means the session is not transferred and the closer owns it:
-     * either expire() already captured it, or the budget is spent while the timer has not fired yet, and the expiry
-     * disposition is taken here under the same monitor, so a late connect is never published.
+     * The final publication of a connected session, called under the holder's publication monitor, after the
+     * lifecycle monitor, so the order is lifecycle, publication, this record. It is atomic with expire() and reads
+     * the absolute deadline, so a late watchdog never lets a late session through. True: the record hands the
+     * session over (transfer), or keeps it at BEFORE_SEND for the publish that follows. False: the record is
+     * EXPIRED and nothing of the candidate was attached to it, so the caller hands the candidate to its cleanup
+     * owner.
      */
-    public boolean transferSession() {
-        JCSMPSession captured;
-        SolaceConnection holder;
-        synchronized (this) {
-            if (state != State.EXPIRED && System.currentTimeMillis() < deadline) {
-                session = null;
-                return true;
-            }
-            if (state == State.EXPIRED) {
-                // expire() captured the session and submitted its close.
-                return false;
-            }
-            // The delayed callback case: the same transition expire() makes, so the callback finds a terminal record.
+    public synchronized boolean publishSession(JCSMPSession candidate, boolean transfer) {
+        if (state == State.EXPIRED) {
+            return false;
+        }
+        if (System.currentTimeMillis() >= deadline) {
+            // The delayed callback case: the same transition expire() makes, so the callback finds a terminal
+            // record. The stage is BEFORE_SEND during a rebuild, so expire() would capture nothing either.
             state = State.EXPIRED;
-            captured = session;
-            holder = conn;
+            return false;
+        }
+        if (transfer) {
             session = null;
-            Hooks.get().point("op.afterExpireLocked", this);
-            if (holder != null && captured != null && holder.session == captured) {
-                holder.failed = true;
-            }
+        } else {
+            session = candidate;
+            // BEFORE_SEND once the session is taken over, so an expiry in the waits that follow leaves it alone.
+            stage = Stage.BEFORE_SEND;
         }
-        if (captured != null) {
-            lc.counters.publishExpired.increment();
-            lc.closeOnCloser(captured);
-        }
-        return false;
+        return true;
     }
 
     /** 3.6: the dedicated session has no pool object. */
@@ -219,7 +211,7 @@ public final class PublishOperation {
         return state == State.EXPIRED;
     }
 
-    /** A publish whose record expired in a wait returns its holder healthy from the operation's finally (A51). */
+    /** A publish whose record expired in a wait returns its holder healthy from the operation's finally. */
     public synchronized boolean expiredWith(JCSMPSession candidate) {
         return state == State.EXPIRED && session == candidate && stage != Stage.BEFORE_SEND;
     }
@@ -239,21 +231,24 @@ public final class PublishOperation {
             state = State.EXPIRED;
             // The session is captured only when the stage says it is in use. At BEFORE_SEND the caller is in the
             // pool wait, the permit wait or the producer lock wait, and its own timed wait faults with nothing
-            // sent (A51).
+            // sent.
             boolean inUse = stage != Stage.BEFORE_SEND;
             captured = inUse ? session : null;
             holder = inUse ? conn : null;
             Hooks.get().point("op.afterExpireLocked", this);
-            // In the same step as EXPIRED, so no observer sees one without the other.
-            if (holder != null && captured != null && holder.session == captured) {
-                holder.failed = true;
-            }
-            // The request reply session is rebuilt at its next use.
+            // The request reply session is rebuilt at its next use. A dedicated session object is never reused, so
+            // this write cannot reach a replacement.
             if (rr != null && captured != null && rr.session == captured) {
                 rr.failed = true;
             }
         }
         if (captured != null) {
+            // The pooled holder is reused, so its failure is written by identity under its publication monitor,
+            // outside this record's monitor in the fixed lock order. The operation's own finally marks it too before
+            // the holder goes back to the pool (expiredWith).
+            if (holder != null) {
+                holder.markFailedIfCurrent(captured);
+            }
             lc.counters.publishExpired.increment();
             lc.closeOnCloser(captured);
         }

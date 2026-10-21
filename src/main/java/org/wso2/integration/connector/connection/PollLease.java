@@ -22,7 +22,7 @@ import com.solacesystems.jcsmp.BytesXMLMessage;
 import java.util.concurrent.ScheduledFuture;
 
 /**
- * One delivery handed out by a poll flow owner (guide 3.5, design 7.10). The object stashed under
+ * One delivery handed out by a poll flow owner. The object stashed under
  * solace.poll.message is this lease, so a caller's timeout can never orphan a lease. An owner may hold several
  * live leases at once, one per message context polling the same flow, and each is removed by its own settle or
  * expiry.

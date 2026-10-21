@@ -45,7 +45,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class SolaceConfigConnector extends AbstractConnector implements ManagedLifecycle {
 
     private static final Log log = LogFactory.getLog(SolaceConfigConnector.class);
-    // A48: the lifecycle destroy and an orphaned logical connection's retire share one body, run once.
+    // The lifecycle destroy and an orphaned logical connection's retire share one body, run once.
     private static final AtomicBoolean destroyedOnce = new AtomicBoolean();
 
     @Override
@@ -56,7 +56,7 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
         if (StringUtils.isEmpty(connectionName)) {
             connectionName = SolaceConstants.CONNECTOR_NAME;
         }
-        // The one context property the operations read. It is a name, never a credential (G8).
+        // The one context property the operations read. It is a name, never a credential.
         messageContext.setProperty(SolaceConstants.NAME, connectionName);
 
         ConnectionHandler handler = ConnectionHandler.getConnectionHandler();
@@ -65,7 +65,7 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
         synchronized (LogicalConnections.lockFor(connectionName)) {
             // Check if connection already exists
             if (!handler.checkIfConnectionExists(SolaceConstants.CONNECTOR_NAME, connectionName)) {
-                // A malformed connection never initialises (3.3): the template is validated before any logical
+                // A malformed connection never initialises: the template is validated before any logical
                 // connection or pool exists.
                 ConnectionSettings settings = ConnectionSettings.parse(messageContext);
                 if (!settings.errors.isEmpty()) {
@@ -77,7 +77,7 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
                 // Closes a previous logical connection of that name and creates the new one from this template.
                 SolaceLogicalConnection lc = LogicalConnections.create(connectionName, messageContext);
                 Configuration cfg = getPoolConfiguration(messageContext);
-                // commons-pool 1.5.6: only a value greater than zero selects the timed wait (G6, A1).
+                // commons-pool 1.5.6: only a value greater than zero selects the timed wait.
                 if (cfg.getMaxWaitTime() == null || cfg.getMaxWaitTime() <= 0) {
                     if (cfg.getMaxWaitTime() != null) {
                         log.warn("SolaceConnector [" + connectionName + "] maxWaitTime " + cfg.getMaxWaitTime()
@@ -90,10 +90,10 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
                     cfg.setExhaustedAction("WHEN_EXHAUSTED_BLOCK");
                 }
                 // The context aware overload: connector core registers the local entry mapping and its undeploy
-                // observer, so a local entry undeploy removes this pool (G12).
+                // observer, so a local entry undeploy removes this pool.
                 handler.createConnection(SolaceConstants.CONNECTOR_NAME, connectionName,
                         new SolaceConnectionFactory(lc), cfg, messageContext);
-                // After the pool exists (3.3). A check between create() and createConnection would close the new
+                // After the pool exists. A check between create() and createConnection would close the new
                 // logical connection.
                 lc.armExistenceCheck();
                 log.info("SolaceConnector [" + connectionName + "] initialised (pool maxActive "
@@ -101,7 +101,7 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
                         + ", maxWait " + cfg.getMaxWaitTime() + " ms)");
                 if (settings.clientNameStrict) {
                     // Strict mode gives pooled session 1 the name verbatim, and a duplicate name loops on
-                    // evictions (A43).
+                    // evictions.
                     log.warn("SolaceConnector [" + connectionName + "] clientNameStrict=true: pooled session 1 uses "
                             + "the client name '" + settings.clientName + "' as is; a second session with this name "
                             + "on the broker evicts it and the two evict each other in turn; keep it unique per node");
@@ -128,7 +128,7 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
         destroyOnce();
     }
 
-    /** Once per connector library. SolaceLogicalConnection.retireOrphan() runs it for an orphan (A48). */
+    /** Once per connector library. SolaceLogicalConnection.retireOrphan() runs it for an orphan. */
     static void destroyOnce() {
         if (!destroyedOnce.compareAndSet(false, true)) {
             return;
@@ -149,7 +149,7 @@ public class SolaceConfigConnector extends AbstractConnector implements ManagedL
         } catch (Exception e) {
             log.error("Error shutting down Solace connections", e);
         }
-        // Each close stops admission and lets its closer run until the last owner detaches (3.3).
+        // Each close stops admission and lets its closer run until the last owner detaches.
         try {
             LogicalConnections.closeAll();
         } catch (Exception e) {

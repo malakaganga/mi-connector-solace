@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -41,9 +42,9 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POL
 import static org.wso2.integration.connector.constants.SolaceConstants.REQUIRE_OUTCOMES_TRUE;
 
 /**
- * The one dedicated poll session of a logical connection and its cache of poll flow owners (guide 3.5, design
- * 7.10). Created lazily and connected by SolaceLogicalConnection.pollSession(op) outside the dedicated lock, under
- * the poll operation's record and one physical attempt at a time (A62). Rebuilt on the next use after DOWN_ERROR.
+ * The one dedicated poll session of a logical connection and its cache of poll flow owners.
+ * Created lazily and connected by SolaceLogicalConnection.pollSession(op) outside the dedicated lock, under
+ * the poll operation's record and one physical attempt at a time. Rebuilt on the next use after DOWN_ERROR.
  */
 public final class PollSession {
 
@@ -53,11 +54,13 @@ public final class PollSession {
     final int generation;
     // Set by connect(). DOWN_ERROR sets failed.
     volatile JCSMPSession session;
-    // The handler of the session, with the reconnect guard registered at connect (A45).
+    // The handler of the session, with the reconnect guard registered at connect.
     volatile PooledSessionEventHandler handler;
     volatile boolean failed = false;
     volatile boolean retired = false;
     private final AtomicBoolean retiredOnce = new AtomicBoolean();
+    // Completes when the retirement's close finished.
+    private final CompletableFuture<Void> retiredClose = new CompletableFuture<>();
     // Access order, least recently used first. Guarded by synchronized (flows), never held across a broker call.
     final Map<String, PollFlowOwner> flows = new LinkedHashMap<>(16, 0.75f, true);
     // Per key creation reservations, guarded by flows. They count toward maxPollFlows.
@@ -69,14 +72,14 @@ public final class PollSession {
 
     PollSession(SolaceLogicalConnection lc) {
         this.lc = lc;
-        // The creation reservation serialises the creation attempts (A53), so one attempt at a time reads and
+        // The creation reservation serialises the creation attempts, so one attempt at a time reads and
         // writes the number.
         this.generation = ++lc.pollGeneration;
         // The constructor ends with the attachment. The creation attempt owns this candidate until publication.
         lc.attach(this);
     }
 
-    /** The creation attempt (3.3): the session and its handler, not connected. The logical connection connects it. */
+    /** The creation attempt: the session and its handler, not connected. The logical connection connects it. */
     JCSMPSession createSession() throws JCSMPException {
         PooledSessionEventHandler sessionHandler = new PooledSessionEventHandler(this);
         JCSMPSession created = lc.createSession("poll", sessionHandler);
@@ -88,7 +91,7 @@ public final class PollSession {
 
     /** The 1.6 algorithm on the connector side, after the connect. A TRUE mismatch is reported by the first poll. */
     void negotiate(JCSMPSession connected) throws JCSMPException {
-        // ArrayList<Boolean> [accepted, failed, rejected], or null on a broker without the capability (Appendix A).
+        // ArrayList<Boolean> [accepted, failed, rejected], or null on a broker without the capability.
         Object capability = connected.getCapability(CapabilityType.SUPPORTED_MESSAGE_SETTLEMENT_CAPABILITIES);
         List<?> outcomes = capability instanceof List ? (List<?>) capability : null;
         failedSupported = outcomes != null && outcomes.size() > 1 && Boolean.TRUE.equals(outcomes.get(1));
@@ -212,12 +215,12 @@ public final class PollSession {
     }
 
     /**
-     * lc.close(), a replacement after DOWN_ERROR, local entry undeploy, or the creation attempt's finally for an
-     * unpublished candidate. Idempotent.
+     * lc.close(), a replacement after DOWN_ERROR, local entry undeploy, or the cleanup of an unpublished
+     * candidate. Idempotent. The returned future completes when the session close finished.
      */
-    void retire() {
+    CompletableFuture<Void> retire() {
         if (!retiredOnce.compareAndSet(false, true)) {
-            return;
+            return retiredClose;
         }
         List<PollFlowOwner> all;
         // Creations in progress see retired at their publication and discard themselves.
@@ -231,12 +234,15 @@ public final class PollSession {
         for (PollFlowOwner owner : all) {
             owner.submitClose("session retired");
         }
-        // Null for a candidate whose createSession or connect failed. The closer already has it.
+        // Null for a candidate whose createSession failed.
         JCSMPSession retiring = session;
-        if (retiring != null) {
-            lc.closeOnCloser(retiring);
-        }
-        // Exactly once, after this owner's close submission.
-        lc.detach(this);
+        CompletableFuture<Void> closed = retiring != null ? lc.closeTracked(retiring)
+                : CompletableFuture.completedFuture(null);
+        closed.whenComplete((ignored, error) -> {
+            // Exactly once, after this owner's close finished.
+            lc.detach(this);
+            retiredClose.complete(null);
+        });
+        return retiredClose;
     }
 }

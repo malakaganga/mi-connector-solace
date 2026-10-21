@@ -35,7 +35,7 @@ public class SolaceConnectionFactory implements ConnectionFactory {
 
     /**
      * Creates the holder without connecting. The first ensureSession of the borrowing operation connects it under
-     * that operation's deadline, so the borrow is bounded by maxWaitTime alone (A1). The attach is the admission:
+     * that operation's deadline, so the borrow is bounded by maxWaitTime alone. The attach is the admission:
      * it fails once the last detach after close() sealed the count, and the refused holder was never attached.
      */
     @Override

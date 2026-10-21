@@ -24,12 +24,13 @@ import com.solacesystems.jcsmp.XMLMessageListener;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * The one dedicated request reply session of a logical connection (guide 3.6, design 7.10).
- * Created by createSession() and connected by the creation attempt of 3.3, one physical attempt at a time (A62).
+ * The one dedicated request reply session of a logical connection.
+ * Created by createSession() and connected by its creation attempt, one physical attempt at a time.
  */
 public final class RequestReplySession {
 
@@ -37,7 +38,7 @@ public final class RequestReplySession {
 
     final SolaceLogicalConnection lc;
     public volatile JCSMPSession session;
-    // The lock covers send() only above a publisher window of 1 (A59).
+    // The lock covers send() only above a publisher window of 1.
     public final SessionPublisher publisher;
     public final Semaphore permits;
     // The 1.0.1 session consumer, needed by the Direct Requestor.
@@ -45,8 +46,10 @@ public final class RequestReplySession {
     private final Object consumerLock = new Object();
     public volatile boolean failed = false;
     private final AtomicBoolean retiredOnce = new AtomicBoolean();
+    // Completes when the retirement's close finished.
+    private final CompletableFuture<Void> retired = new CompletableFuture<>();
     private final String connectionId;
-    // The handler of the session, with the reconnect guard registered at connect (A45).
+    // The handler of the session, with the reconnect guard registered at connect.
     volatile PooledSessionEventHandler handler;
 
     RequestReplySession(SolaceLogicalConnection lc) {
@@ -73,22 +76,25 @@ public final class RequestReplySession {
     }
 
     /**
-     * Idempotent. A candidate that was never published is retired by the creation attempt's finally.
-     * Outstanding requests fault on their next step through a closed flow or a failed future.
+     * Idempotent. The cleanup owner of an unpublished candidate and of a replaced or closed session. Outstanding
+     * requests fault on their next step through a closed flow or a failed future. The returned future completes
+     * when the close finished, and the attachment is released only then.
      */
-    void retire() {
+    CompletableFuture<Void> retire() {
         if (!retiredOnce.compareAndSet(false, true)) {
-            return;
+            return retired;
         }
         failed = true;
         publisher.failPending("request-reply session retired");
-        // Null when the session already went to the closer during the attempt.
         JCSMPSession retiring = session;
-        if (retiring != null) {
-            lc.closeOnCloser(retiring);
-        }
-        // Exactly once, after this owner's close submission.
-        lc.detach(this);
+        CompletableFuture<Void> closed = retiring != null ? lc.closeTracked(retiring)
+                : CompletableFuture.completedFuture(null);
+        closed.whenComplete((ignored, error) -> {
+            // Exactly once, after this owner's close finished.
+            lc.detach(this);
+            retired.complete(null);
+        });
+        return retired;
     }
 
     /**
@@ -105,7 +111,7 @@ public final class RequestReplySession {
                 XMLMessageConsumer newConsumer = null;
                 try {
                     // The guard registered at connect is the consumer to start, so the reconnect handler stays
-                    // with the session (A45). Without one, a null listener gives the synchronous consumer as today.
+                    // with the session. Without one, a null listener gives the synchronous consumer as today.
                     XMLMessageConsumer guard = handler.guard();
                     newConsumer = guard != null ? guard : session.getMessageConsumer((XMLMessageListener) null);
                     newConsumer.start();
@@ -131,7 +137,7 @@ public final class RequestReplySession {
                             }
                         }
                     }
-                    // The next call creates a fresh consumer (A45).
+                    // The next call creates a fresh consumer.
                     handler.clearGuard();
                     throw new JCSMPException("Failed to create session consumer on connection "
                             + connectionId, e);

@@ -47,7 +47,7 @@ public class SolaceBeginTransaction extends AbstractConnector {
         // Nested begin would orphan the outer tx — its TX_CONNECTION_ID would be
         // overwritten and the outer pinned connection could only be reclaimed by the watchdog.
         log.debug("solace.beginTransaction: invoked");
-        // A connector owned transaction cannot be nested inside an inbound owned one (G11).
+        // A connector owned transaction cannot be nested inside an inbound owned one.
         if (messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_TX) instanceof Executor) {
             fault(FAULT_INBOUND_TRANSACTION, ERROR_CODE_INBOUND_TRANSACTION,
                     "beginTransaction is not supported inside an inbound-owned transaction (G11)", null, messageContext);
@@ -87,7 +87,7 @@ public class SolaceBeginTransaction extends AbstractConnector {
             log.debug("solace.beginTransaction: pinned connection acquired (connectionId="
                     + connection.getConnectionId() + ")");
 
-            // Connects the holder on first use under an attempt record of the transaction's own timeout (3.3). The
+            // Connects the holder on first use under an attempt record of the transaction's own timeout. The
             // record is finished before the session is handed to the transaction.
             connection.ensureSession(System.currentTimeMillis() + timeoutMillis);
 

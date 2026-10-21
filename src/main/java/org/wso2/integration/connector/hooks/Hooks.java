@@ -20,7 +20,7 @@ package org.wso2.integration.connector.hooks;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * The one indirection the test campaign uses for latches and toggles (guide 0.5).
+ * The one indirection the tests use for latches and toggles.
  * The shipped build resolves the no op subclass and pays one static read and one virtual call per hook point.
  */
 public abstract class Hooks {

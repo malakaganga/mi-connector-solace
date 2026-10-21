@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * One command of a transaction (guide 3.7, design 7.9). The command contract is shared with the inbound
+ * One command of a transaction. The command contract is shared with the inbound
  * endpoint's owner loop: a FutureTask that is Delayed, so the owner can enforce the caller's deadline, and a
  * Consumer of the owner's cancellation reason, so the caller never infers the reason from the clock. All three
  * are JDK types, so the contract crosses the library boundary.

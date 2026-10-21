@@ -27,7 +27,7 @@ import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Reads the OAuth2 token from a file at every connect (design 7.11). The connector's copy of the inbound's class.
+ * Reads the OAuth2 token from a file at every connect. The connector's copy of the inbound's class.
  */
 public final class OAuthTokenSource {
 

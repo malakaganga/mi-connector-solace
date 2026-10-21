@@ -20,7 +20,7 @@ package org.wso2.integration.connector.connection;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * One set of cumulative counters per logical connection (guide 0.4).
+ * One set of cumulative counters per logical connection.
  */
 public final class ConnectionCounters {
 

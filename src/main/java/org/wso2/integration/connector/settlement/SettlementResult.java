@@ -21,7 +21,7 @@ import static org.wso2.integration.connector.constants.SolaceConstants.MODE_DEFE
 import static org.wso2.integration.connector.constants.SolaceConstants.MODE_DIRECT;
 
 /**
- * The result of a settlement operation (guide 3.2, design 6.4): whether the message was settled, through which
+ * The result of a settlement operation: whether the message was settled, through which
  * path, and why not when it was not.
  */
 public final class SettlementResult {

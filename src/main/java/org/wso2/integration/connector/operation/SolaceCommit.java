@@ -67,7 +67,7 @@ public class SolaceCommit extends AbstractConnector {
                 + entry.connection.getConnectionId() + " (connectionName=" + entry.connectionName + ")");
         try {
             // The completion runs on the transaction's own thread and is never cancelled from here. The wait is
-            // bounded, the completion is not (G10).
+            // bounded, the completion is not.
             TransactionExecutor.CompletionCommand completion = entry.executor.completionCommand(true);
             entry.executor.execute(completion);
             completion.get(TX_COMPLETION_WAIT_MS, TimeUnit.MILLISECONDS);

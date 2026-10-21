@@ -69,10 +69,10 @@ public final class SolaceTransactionRegistry {
     }
 
     /**
-     * Creates the entry, its executor and its thread (guide 3.7). The entry is attached to the logical connection.
+     * Creates the entry, its executor and its thread. The entry is attached to the logical connection.
      * One protocol under the registry's lock, which shutdown() takes too: the entry enters the map, the timeout is
      * scheduled, the owner starts, so a timeout that fires always finds its entry. A scheduling or start failure
-     * removes the entry, releases its attachment, stops its executor and faults the begin with the cause (A68).
+     * removes the entry, releases its attachment, stops its executor and faults the begin with the cause.
      */
     public static synchronized Entry register(SolaceConnection connection, String connectionName, long timeoutMillis)
             throws SolaceFault {

@@ -18,7 +18,7 @@
 package org.wso2.integration.connector;
 
 /**
- * A connector fault with its name, its error code and whether the broker outcome is unknown (guide 0.3).
+ * A connector fault with its name, its error code and whether the broker outcome is unknown.
  * Every operation converts it into ERROR_CODE and ERROR_MESSAGE and raises it through handleException.
  */
 public class SolaceFault extends Exception {
