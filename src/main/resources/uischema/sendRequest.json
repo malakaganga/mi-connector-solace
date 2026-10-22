@@ -101,6 +101,38 @@
           {
             "type": "attribute",
             "value": {
+              "name": "waitForAck",
+              "displayName": "Wait For Ack",
+              "inputType": "boolean",
+              "defaultValue": true,
+              "helpTip": "Wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT request before waiting for the reply. Ignored for DIRECT.",
+              "enableCondition": [
+                "NOT",
+                {
+                  "deliveryMode": "DIRECT"
+                }
+              ]
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "ackTimeout",
+              "displayName": "Ack Timeout",
+              "inputType": "stringOrExpression",
+              "defaultValue": "10000",
+              "helpTip": "Deadline in milliseconds for the send and the broker acknowledgement of the request. The Request Timeout bounds the whole operation.",
+              "enableCondition": [
+                "NOT",
+                {
+                  "deliveryMode": "DIRECT"
+                }
+              ]
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
               "name": "applicationMessageId",
               "displayName": "Application Message ID",
               "inputType": "stringOrExpression",

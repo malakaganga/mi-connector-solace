@@ -18,6 +18,7 @@
   -->
 <template name="nackMessage" xmlns="http://ws.apache.org/ns/synapse">
     <parameter name="outcomeType" description="Settlement outcome: FAILED (redeliver) or REJECTED (send to DMQ). Default: FAILED."/>
+    <parameter name="target" description="INBOUND (default) settles the inbound endpoint's message through its settlement handle. POLL settles the message stashed by a poll with ackMode=CLIENT."/>
     <parameter name="responseVariable" description="The name of the variable to which the output should be stored."/>
     <parameter name="overwriteBody" description="Replace the Message Body in Message Context with the response."/>
     <sequence>

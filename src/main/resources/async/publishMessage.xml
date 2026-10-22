@@ -34,8 +34,8 @@
     <parameter name="dmqEligible" description="Whether the message is eligible for the Dead Message Queue (true/false)."/>
     <parameter name="elidingEligible" description="Whether the message is eligible for eliding (true/false)."/>
     <parameter name="expiration" description="Absolute message expiration time as a UTC epoch in milliseconds (0 means no expiration)."/>
-    <parameter name="waitForAck" description="If true, block for the broker ACK before returning (PERSISTENT/NON_PERSISTENT only). Default: false."/>
-    <parameter name="ackTimeout" description="Maximum time in milliseconds to wait for the broker ACK when waitForAck=true. Default: 10000."/>
+    <parameter name="waitForAck" description="If true, block for the broker ACK before returning (PERSISTENT/NON_PERSISTENT only). Default: true for PERSISTENT and NON_PERSISTENT."/>
+    <parameter name="ackTimeout" description="Deadline in milliseconds for connect, send and the broker acknowledgement. The pool borrow is bounded by the connection's maxWaitTime. Default: 10000."/>
     <parameter name="continueOnAckFailure" description="When true, a NACK or ACK timeout does not throw. Inspect 'solace.ack.status' (ACK|NACK|TIMEOUT) to handle the outcome. Default: false."/>
     <parameter name="responseVariable" description="The name of the variable to which the output should be stored."/>
     <parameter name="overwriteBody" description="Replace the Message Body in Message Context with the response of the operation."/>

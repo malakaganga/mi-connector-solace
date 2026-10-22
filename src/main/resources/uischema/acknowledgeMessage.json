@@ -2,13 +2,25 @@
   "connectorName": "solace",
   "operationName": "acknowledgeMessage",
   "title": "Acknowledge Message",
-  "help": "Acknowledge a message received by the inbound endpoint so the broker can remove it from the queue. Requires the inbound endpoint to be configured with solace.autoAck=false.",
+  "help": "Acknowledge a message received by the inbound endpoint (target INBOUND, the default) or a message polled with ackMode CLIENT (target POLL). The inbound endpoint must run with solace.autoAck=false. The settlement outcomes are negotiated with the broker by the inbound endpoint.",
   "elements": [
     {
       "type": "attributeGroup",
       "value": {
         "groupName": "General",
         "elements": [
+          {
+            "type": "attribute",
+            "value": {
+              "name": "target",
+              "displayName": "Target",
+              "inputType": "combo",
+              "comboValues": ["INBOUND", "POLL"],
+              "defaultValue": "INBOUND",
+              "required": "false",
+              "helpTip": "INBOUND settles the inbound endpoint's message through its settlement handle. POLL settles the message stashed by a poll with ackMode=CLIENT."
+            }
+          },
           {
             "type": "attribute",
             "value": {

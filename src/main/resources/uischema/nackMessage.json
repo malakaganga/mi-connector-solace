@@ -2,7 +2,7 @@
   "connectorName": "solace",
   "operationName": "nackMessage",
   "title": "Nack Message",
-  "help": "Negatively acknowledge an inbound message. FAILED redelivers (up to max-redelivery), REJECTED routes to the Dead Message Queue. Requires the inbound endpoint to be configured with solace.autoAck=false and to declare required settlement outcomes (FAILED, REJECTED) on its consumer flow.",
+  "help": "Negatively acknowledge a message received by the inbound endpoint (target INBOUND, the default) or a message polled with ackMode CLIENT (target POLL). FAILED asks the broker to redeliver, REJECTED moves the message to the dead message queue. The inbound endpoint must run with solace.autoAck=false.",
   "elements": [
     {
       "type": "attributeGroup",
@@ -22,6 +22,18 @@
               "defaultValue": "FAILED",
               "required": "true",
               "helpTip": "FAILED: broker redelivers the message (subject to max-redelivery, then DMQ if configured). REJECTED: broker routes immediately to DMQ, otherwise discards. Inbound endpoint must declare required settlement outcomes for this to work."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "target",
+              "displayName": "Target",
+              "inputType": "combo",
+              "comboValues": ["INBOUND", "POLL"],
+              "defaultValue": "INBOUND",
+              "required": "false",
+              "helpTip": "INBOUND settles the inbound endpoint's message through its settlement handle. POLL settles the message stashed by a poll with ackMode=CLIENT."
             }
           },
           {

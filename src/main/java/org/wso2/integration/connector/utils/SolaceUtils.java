@@ -43,7 +43,6 @@ import org.wso2.integration.connector.models.SolaceMessageProperties;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Utility class for building JCSMP properties from the Synapse MessageContext.
@@ -522,16 +521,7 @@ public final class SolaceUtils {
             properties.setProperty(JCSMPProperties.PASSWORD, password);
         }
 
-        // Client name — Solace requires this to be unique per session. Multiple pool
-        // members sharing a name cause the broker to kick older sessions off
-        // ("Channel is closed by peer") whenever a new one logs in. Treat the
-        // user-supplied value as a prefix and append a random suffix per session.
-        String clientName = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.CLIENT_NAME);
-        if (StringUtils.isNotEmpty(clientName)) {
-            String uniqueClientName = clientName + "-" + UUID.randomUUID().toString().substring(0, 8);
-            properties.setProperty(JCSMPProperties.CLIENT_NAME, uniqueClientName);
-        }
+        // The client name is set per session by the logical connection, never here.
 
         // Channel properties (timeouts, retries, compression)
         JCSMPChannelProperties channelProps = (JCSMPChannelProperties) properties.getProperty(

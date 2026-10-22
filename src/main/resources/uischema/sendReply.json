@@ -21,6 +21,18 @@
               "required": "true",
               "helpTip": "The connection to use for the operation."
             }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "target",
+              "displayName": "Target",
+              "inputType": "combo",
+              "comboValues": ["INBOUND", "POLL"],
+              "defaultValue": "INBOUND",
+              "required": "false",
+              "helpTip": "INBOUND replies to the message the inbound endpoint stashed. POLL replies to the message stashed by a poll with ackMode=CLIENT."
+            }
           }
         ]
       }
@@ -43,6 +55,38 @@
                 "NON_PERSISTENT"
               ],
               "helpTip": "Delivery mode: DIRECT, PERSISTENT, or NON_PERSISTENT."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "waitForAck",
+              "displayName": "Wait For Ack",
+              "inputType": "boolean",
+              "defaultValue": true,
+              "helpTip": "Wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT reply before returning. Ignored for DIRECT.",
+              "enableCondition": [
+                "NOT",
+                {
+                  "deliveryMode": "DIRECT"
+                }
+              ]
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "ackTimeout",
+              "displayName": "Ack Timeout",
+              "inputType": "stringOrExpression",
+              "defaultValue": "10000",
+              "helpTip": "Deadline in milliseconds for the connect, the send and the broker acknowledgement of the reply.",
+              "enableCondition": [
+                "NOT",
+                {
+                  "deliveryMode": "DIRECT"
+                }
+              ]
             }
           },
           {

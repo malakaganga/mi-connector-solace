@@ -153,7 +153,7 @@
                     "inputType": "string",
                     "defaultValue": "",
                     "required": "false",
-                    "helpTip": "Unique client name for the session (auto-generated if not provided)."
+                    "helpTip": "Client name prefix. Each session of this connection appends the node, the connection name and a role suffix. Set clientNameStrict to send the name as given."
                   }
                 }
               ]
@@ -437,6 +437,238 @@
               "defaultValue": false,
               "required": "false",
               "helpTip": "Whether to calculate message expiration based on TTL."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "attributeGroup",
+      "value": {
+        "groupName": "Reliability",
+        "isCollapsed": true,
+        "elements": [
+          {
+            "type": "attribute",
+            "value": {
+              "name": "pollAckTimeout",
+              "displayName": "Poll Ack Timeout (ms)",
+              "inputType": "string",
+              "defaultValue": "180000",
+              "required": "false",
+              "helpTip": "Lease of a message polled with ackMode=CLIENT. When it passes unsettled, the connector settles the message FAILED and the broker redelivers it."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "pollFlowIdleTimeout",
+              "displayName": "Poll Flow Idle Timeout (ms)",
+              "inputType": "string",
+              "defaultValue": "60000",
+              "required": "false",
+              "helpTip": "An idle poll flow with no outstanding lease is closed after this time."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "maxPollFlows",
+              "displayName": "Max Poll Flows",
+              "inputType": "string",
+              "defaultValue": "16",
+              "required": "false",
+              "helpTip": "Poll flows cached per connection, one per queue and selector, each with its own owner thread. Beyond it the least recently used idle flow is evicted, and when none is idle the poll faults with POLL_FLOW_LIMIT."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "requireSettlementOutcomes",
+              "displayName": "Require Settlement Outcomes",
+              "inputType": "combo",
+              "comboValues": ["AUTO", "TRUE"],
+              "defaultValue": "AUTO",
+              "required": "false",
+              "helpTip": "AUTO requests the settlement outcomes the broker reports and, for a missing one, retains the message and recycles its flow so the broker redelivers it. TRUE fails the poll flow bind when the broker lacks FAILED or REJECTED."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "maxConcurrentRequests",
+              "displayName": "Max Concurrent Requests",
+              "inputType": "string",
+              "defaultValue": "100",
+              "required": "false",
+              "helpTip": "Concurrent sendRequest calls on the connection's request reply session. A call beyond it waits up to its requestTimeout and then faults with REQUEST_CONCURRENCY_EXCEEDED."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "recovery.initialDelay",
+              "displayName": "Recovery Initial Delay (ms)",
+              "inputType": "string",
+              "defaultValue": "1000",
+              "required": "false",
+              "helpTip": "First delay before a failed session is rebuilt."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "recovery.progression",
+              "displayName": "Recovery Progression",
+              "inputType": "string",
+              "defaultValue": "2.0",
+              "required": "false",
+              "helpTip": "Multiplier applied to the delay after each failed rebuild attempt."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "recovery.maxDelay",
+              "displayName": "Recovery Max Delay (ms)",
+              "inputType": "string",
+              "defaultValue": "60000",
+              "required": "false",
+              "helpTip": "Upper bound of the rebuild delay."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "recovery.maxAttempts",
+              "displayName": "Recovery Max Attempts",
+              "inputType": "string",
+              "defaultValue": "-1",
+              "required": "false",
+              "helpTip": "Rebuild attempts before the operation faults. -1 means unlimited within the operation's deadline."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "clientNameStrict",
+              "displayName": "Client Name Strict",
+              "inputType": "boolean",
+              "defaultValue": false,
+              "required": "false",
+              "helpTip": "When enabled the Client Name is sent as given to the first pooled session and the other sessions append their role. When disabled every session name is the Client Name prefix followed by the node id, the connection name and the session's role."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "oauth2TokenFile",
+              "displayName": "OAuth2 Token File",
+              "inputType": "string",
+              "defaultValue": "",
+              "required": "false",
+              "helpTip": "Path of a file holding the OAuth2 access token. The token is read from the file at every connect and reconnect, so a sidecar can rotate it. Requires the OAUTH2 authentication scheme.",
+              "enableCondition": [
+                {"authenticationScheme": "OAUTH2"}
+              ]
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "keepAliveInterval",
+              "displayName": "Keep Alive Interval (ms)",
+              "inputType": "string",
+              "defaultValue": "",
+              "required": "false",
+              "helpTip": "Keep alive interval of the JCSMP sessions. Empty leaves the JCSMP default."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "keepAliveLimit",
+              "displayName": "Keep Alive Limit",
+              "inputType": "string",
+              "defaultValue": "",
+              "required": "false",
+              "helpTip": "Missed keep alive responses after which a JCSMP session is considered lost. Empty leaves the JCSMP default."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "attributeGroup",
+      "value": {
+        "groupName": "Pool",
+        "isCollapsed": true,
+        "elements": [
+          {
+            "type": "attribute",
+            "value": {
+              "name": "maxActiveConnections",
+              "displayName": "Max Active Connections",
+              "inputType": "string",
+              "defaultValue": "8",
+              "required": "false",
+              "helpTip": "Maximum number of pooled sessions. The connection keeps at most twice this number of pooled physical sessions, counting those still connecting or being closed."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "maxIdleConnections",
+              "displayName": "Max Idle Connections",
+              "inputType": "string",
+              "defaultValue": "8",
+              "required": "false",
+              "helpTip": "Maximum number of idle pooled sessions kept."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "maxWaitTime",
+              "displayName": "Max Wait Time (ms)",
+              "inputType": "string",
+              "defaultValue": "10000",
+              "required": "false",
+              "helpTip": "Time an operation waits for a pooled session before it faults. Zero or a negative value is replaced by 10000, because the pool would wait forever."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "minEvictionTime",
+              "displayName": "Min Eviction Time (ms)",
+              "inputType": "string",
+              "defaultValue": "",
+              "required": "false",
+              "helpTip": "Time a pooled session may stay idle before the evictor may close it. Empty leaves the pool default."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "evictionCheckInterval",
+              "displayName": "Eviction Check Interval (ms)",
+              "inputType": "string",
+              "defaultValue": "",
+              "required": "false",
+              "helpTip": "Interval between runs of the pool evictor. Empty leaves the evictor off."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
+              "name": "exhaustedAction",
+              "displayName": "Exhausted Action",
+              "inputType": "combo",
+              "comboValues": ["WHEN_EXHAUSTED_BLOCK", "WHEN_EXHAUSTED_FAIL", "WHEN_EXHAUSTED_GROW"],
+              "defaultValue": "WHEN_EXHAUSTED_BLOCK",
+              "required": "false",
+              "helpTip": "What a borrow does when every pooled session is in use. WHEN_EXHAUSTED_BLOCK waits up to Max Wait Time, WHEN_EXHAUSTED_FAIL faults at once, WHEN_EXHAUSTED_GROW creates one more session and removes the limit on pooled physical sessions."
             }
           }
         ]

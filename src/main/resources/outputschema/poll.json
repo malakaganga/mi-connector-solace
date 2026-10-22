@@ -25,6 +25,14 @@
           "type": "boolean",
           "description": "Whether the poll timed out without receiving a message."
         },
+        "ackMode": {
+          "type": "string",
+          "description": "AUTO when the flow owner acknowledged the message right after handing it to this call. CLIENT when the message is stashed under solace.poll.message for acknowledgeMessage or nackMessage with target=POLL. Absent inside a transaction, where commit or rollback settles the message."
+        },
+        "leaseDeadline": {
+          "type": "integer",
+          "description": "Epoch time in milliseconds at which the connector settles an unsettled CLIENT lease FAILED, so the broker redelivers the message. Present only for ackMode=CLIENT when a message was received."
+        },
         "contentType": {
           "type": "string",
           "description": "The content type of the polled message payload (e.g., application/json, application/xml, text/plain). Present only when a message was received."

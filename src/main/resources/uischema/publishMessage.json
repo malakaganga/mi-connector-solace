@@ -228,7 +228,7 @@
               "name": "waitForAck",
               "displayName": "Wait For Ack",
               "inputType": "boolean",
-              "defaultValue": false,
+              "defaultValue": true,
               "helpTip": "If true, block for the broker ACK before returning. Ack outcome is exposed via the 'solace.ack.status' property (ACK | NACK | TIMEOUT). Only applies to PERSISTENT and NON_PERSISTENT delivery modes.",
               "enableCondition": [
                 "NOT",
@@ -245,7 +245,7 @@
               "displayName": "Ack Timeout",
               "inputType": "stringOrExpression",
               "defaultValue": "10000",
-              "helpTip": "Maximum time in milliseconds to wait for the broker ACK when Wait For Ack is enabled.",
+              "helpTip": "Deadline in milliseconds of the whole operation: the pool borrow, the session check, the send and the broker acknowledgement. Default 10000.",
               "enableCondition": [
                 "AND",
                 {

@@ -18,6 +18,7 @@
 
 package org.wso2.integration.connector.connection;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,8 +29,10 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.wso2.integration.connector.constants.SolaceConstants;
-import org.wso2.integration.connector.core.connection.ConnectionHandler;
+import org.wso2.integration.connector.SolaceFault;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_CONNECTION_ERROR;
 
 /**
  * Tracks active transactional connections by transaction id, with an auto-rollback
@@ -65,26 +68,47 @@ public final class SolaceTransactionRegistry {
         return watchdog;
     }
 
-    public static String register(SolaceConnection connection, String connectionName, long timeoutMillis) {
+    /**
+     * Creates the entry, its executor and its thread. The entry is attached to the logical connection.
+     * One protocol under the registry's lock, which shutdown() takes too: the entry enters the map, the timeout is
+     * scheduled, the owner starts, so a timeout that fires always finds its entry. A scheduling or start failure
+     * removes the entry, releases its attachment, stops its executor and faults the begin with the cause.
+     */
+    public static synchronized Entry register(SolaceConnection connection, String connectionName, long timeoutMillis)
+            throws SolaceFault {
         String txId = UUID.randomUUID().toString();
-        Entry entry = new Entry(connection, connectionName);
-        entry.timeoutFuture = watchdog().schedule(() -> autoRollback(txId),
-                timeoutMillis, TimeUnit.MILLISECONDS);
+        Entry entry = new Entry(connection, connectionName, txId);
+        connection.lc.attach(entry);
         entries.put(txId, entry);
+        try {
+            entry.timeoutFuture = watchdog().schedule(() -> autoRollback(txId),
+                    timeoutMillis, TimeUnit.MILLISECONDS);
+            entry.executor.start();
+        } catch (RuntimeException e) {
+            entries.remove(txId);
+            if (entry.timeoutFuture != null) {
+                entry.timeoutFuture.cancel(false);
+            }
+            entry.executor.closeAdmission();
+            entry.executor.finished = true;
+            connection.lc.detach(entry);
+            throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                    "transaction registration failed on connection " + connection.getConnectionId() + ": " + e, e);
+        }
         log.info("TransactionRegistry: registered txId=" + txId + " (connectionName=" + connectionName
                 + ", connectionId=" + connection.getConnectionId() + ", timeoutMillis=" + timeoutMillis
                 + ", activeCount=" + entries.size() + ")");
-        return txId;
+        return entry;
     }
 
-    public static SolaceConnection get(String txId) {
+    public static Entry get(String txId) {
         Entry e = entries.get(txId);
         if (e == null) {
             log.debug("TransactionRegistry: lookup miss for txId=" + txId
                     + " (activeCount=" + entries.size() + ")");
             return null;
         }
-        return e.connection;
+        return e;
     }
 
     public static Entry unregister(String txId) {
@@ -101,53 +125,48 @@ public final class SolaceTransactionRegistry {
     }
 
     /**
-     * Shuts down the watchdog executor and clears any remaining entries. Called on connector
-     * teardown ({@code SolaceConfigConnector.destroy}) so the daemon thread doesn't outlive the
-     * connector's classloader — a lingering thread would pin the classloader and leak it (and
-     * the thread) across redeploys. Outstanding transacted sessions are released by the
-     * connection-pool shutdown that follows; here we just stop the scheduler and drop entries.
+     * Connector teardown (SolaceConfigConnector.destroy). Every open transaction is rolled back on its own
+     * executor, which returns the holder and detaches the entry. Then the watchdog stops, so its daemon thread
+     * does not outlive the connector's classloader.
      */
     public static synchronized void shutdown() {
-        watchdog.shutdownNow();
-        int remaining = entries.size();
-        if (remaining > 0) {
-            log.warn("TransactionRegistry: shutting down with " + remaining + " active transaction(s)"
-                    + " still registered; their connections will be closed by the pool shutdown.");
+        for (String txId : new ArrayList<>(entries.keySet())) {
+            Entry entry = unregister(txId);
+            if (entry == null) {
+                continue;
+            }
+            entry.executor.execute(entry.executor.completionCommand(false));
+            log.warn("solace transaction " + txId + " rolled back: connector undeployed");
         }
+        watchdog.shutdownNow();
         entries.clear();
         log.info("TransactionRegistry: watchdog shut down.");
     }
 
+    /** Watchdog thread. Nothing runs here but the submission. */
     private static void autoRollback(String txId) {
         Entry e = entries.remove(txId);
         if (e == null) return;
         log.warn("Transaction " + txId + " timed out — auto-rolling back (connectionName="
                 + e.connectionName + ", connectionId=" + e.connection.getConnectionId() + ")");
-        try {
-            e.connection.rollbackTransaction();
-            log.info("TransactionRegistry: auto-rollback completed for txId=" + txId);
-        } catch (Exception ex) {
-            log.error("Auto-rollback failed for transaction " + txId, ex);
-        } finally {
-            try {
-                ConnectionHandler.getConnectionHandler().returnConnection(
-                        SolaceConstants.CONNECTOR_NAME, e.connectionName, e.connection);
-                log.debug("TransactionRegistry: returned connection to pool after auto-rollback for txId="
-                        + txId);
-            } catch (Exception ex) {
-                log.error("Failed to return Solace connection to pool after auto-rollback for tx "
-                        + txId, ex);
-            }
-        }
+        e.executor.execute(e.executor.completionCommand(false));
     }
 
     public static class Entry {
         public final SolaceConnection connection;
         public final String connectionName;
+        public final String txId;
+        public final TransactionExecutor executor;
+        // Set by closeAdmission(): no command runs after it.
+        volatile boolean terminal;
+        // Set when a command was cut off while running: the completion rolls back even on commit.
+        volatile boolean uncertain;
         ScheduledFuture<?> timeoutFuture;
-        Entry(SolaceConnection c, String n) {
+        Entry(SolaceConnection c, String n, String txId) {
             this.connection = c;
             this.connectionName = n;
+            this.txId = txId;
+            this.executor = new TransactionExecutor(this, txId, c.lc);
         }
     }
 }

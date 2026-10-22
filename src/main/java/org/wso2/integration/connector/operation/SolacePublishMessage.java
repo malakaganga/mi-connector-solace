@@ -18,17 +18,27 @@
 
 package org.wso2.integration.connector.operation;
 
-import com.solacesystems.jcsmp.JCSMPException;
+import com.solacesystems.jcsmp.BytesXMLMessage;
+import com.solacesystems.jcsmp.Destination;
+import com.solacesystems.jcsmp.XMLMessageProducer;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
 import org.apache.synapse.core.axis2.Axis2MessageContext;
 import org.json.JSONObject;
+import org.wso2.integration.connector.SolaceFault;
+import org.wso2.integration.connector.connection.LogicalConnections;
+import org.wso2.integration.connector.connection.MessageBuilder;
+import org.wso2.integration.connector.connection.PublishOperation;
 import org.wso2.integration.connector.connection.SolaceConnection;
+import org.wso2.integration.connector.connection.SolaceLogicalConnection;
 import org.wso2.integration.connector.connection.SolaceTransactionRegistry;
+import org.wso2.integration.connector.connection.TransactionBridge;
+import org.wso2.integration.connector.connection.TransactionCommand;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnectorOperation;
+import org.wso2.integration.connector.core.ConnectException;
 import org.wso2.integration.connector.core.connection.ConnectionHandler;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
 import org.wso2.integration.connector.models.PublishResult;
@@ -37,6 +47,18 @@ import org.wso2.integration.connector.utils.SolaceUtils;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Executor;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_EXPIRED;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_NACK;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_PUBLISH_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_CONNECTION_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_DEADLINE;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_EXPIRED;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_NACK;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_PUBLISH_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_UNKNOWN;
 
 /**
  * Publishes a message to Solace (operation class).
@@ -61,159 +83,261 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
                     + ", connectionName=" + connectionName);
         }
 
-        SolaceConnection connection = null;
-        try {
-            if (isTransactional) {
-                connection = SolaceTransactionRegistry.get(txId);
-                if (connection == null) {
-                    log.error("solace.publishMessage: txId=" + txId + " not found in TransactionRegistry");
-                    handleException("Transaction " + txId + " not found", messageContext);
-                    return;
-                }
-                log.info("solace.publishMessage: txId=" + txId
-                        + " resolved to connectionId=" + connection.getConnectionId());
-            } else {
-                connection = (SolaceConnection) handler.getConnection(
-                        SolaceConstants.CONNECTOR_NAME, connectionName);
-                if (connection == null || !connection.isConnected()) {
-                    handleException("Solace connection is not available or not connected.", messageContext);
-                    return;
-                }
-            }
-
-            // Extract parameters
-            String destinationType = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.DESTINATION_TYPE);
-            if (StringUtils.isEmpty(destinationType)) {
-                destinationType = SolaceConstants.DESTINATION_TYPE_TOPIC;
-            }
-            String destinationName = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.DESTINATION_NAME);
-            if (StringUtils.isEmpty(destinationName)) {
-                handleException("Destination name is required for publishing a message.", messageContext);
+        SolaceTransactionRegistry.Entry transactionEntry = null;
+        if (isTransactional) {
+            transactionEntry = SolaceTransactionRegistry.get(txId);
+            if (transactionEntry == null) {
+                log.error("solace.publishMessage: txId=" + txId + " not found in TransactionRegistry");
+                handleException("Transaction " + txId + " not found", messageContext);
                 return;
             }
+            log.info("solace.publishMessage: txId=" + txId
+                    + " resolved to connectionId=" + transactionEntry.connection.getConnectionId());
+        }
+        // An inbound owned transaction: the inbound endpoint's worker owns the executor and the producer.
+        Object inboundTx = messageContext.getProperty(SolaceConstants.SOLACE_INBOUND_TX);
+        boolean inboundOwned = inboundTx instanceof Executor;
 
-            String deliveryMode = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.DELIVERY_MODE);
-            if (StringUtils.isEmpty(deliveryMode)) {
-                deliveryMode = SolaceConstants.DELIVERY_MODE_DIRECT;
-            }
+        // Extract parameters
+        String destinationType = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.DESTINATION_TYPE);
+        if (StringUtils.isEmpty(destinationType)) {
+            destinationType = SolaceConstants.DESTINATION_TYPE_TOPIC;
+        }
+        String destinationName = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.DESTINATION_NAME);
+        if (StringUtils.isEmpty(destinationName)) {
+            handleException("Destination name is required for publishing a message.", messageContext);
+            return;
+        }
 
-            if (SolaceConstants.DESTINATION_TYPE_QUEUE.equalsIgnoreCase(destinationType)
-                    && SolaceConstants.DELIVERY_MODE_DIRECT.equalsIgnoreCase(deliveryMode)) {
-                handleException("Invalid delivery mode 'DIRECT' for QUEUE destination '" + destinationName
-                        + "'. Queues require guaranteed delivery — use PERSISTENT or NON_PERSISTENT.",
-                        messageContext);
-                return;
-            }
+        String deliveryMode = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.DELIVERY_MODE);
+        if (StringUtils.isEmpty(deliveryMode)) {
+            deliveryMode = SolaceConstants.DELIVERY_MODE_DIRECT;
+        }
 
-            // Transacted sessions only carry guaranteed messages — DIRECT bypasses the spool
-            // and has no rollback semantics, so the JCSMP transacted producer rejects it.
-            if (isTransactional
-                    && SolaceConstants.DELIVERY_MODE_DIRECT.equalsIgnoreCase(deliveryMode)) {
-                handleException("Invalid delivery mode 'DIRECT' inside a transaction (txId=" + txId
-                        + ", destination='" + destinationName + "'). Transacted sessions only support"
-                        + " guaranteed delivery — use PERSISTENT or NON_PERSISTENT.",
-                        messageContext);
-                return;
-            }
+        if (SolaceConstants.DESTINATION_TYPE_QUEUE.equalsIgnoreCase(destinationType)
+                && SolaceConstants.DELIVERY_MODE_DIRECT.equalsIgnoreCase(deliveryMode)) {
+            handleException("Invalid delivery mode 'DIRECT' for QUEUE destination '" + destinationName
+                    + "'. Queues require guaranteed delivery — use PERSISTENT or NON_PERSISTENT.",
+                    messageContext);
+            return;
+        }
 
-            String messageType = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.MESSAGE_TYPE);
-            if (StringUtils.isEmpty(messageType)) {
-                messageType = SolaceConstants.MESSAGE_TYPE_TEXT;
-            }
-            messageType = messageType.toUpperCase();
-            // Solace has no JSON message type — JSON payloads are carried as TEXT on the wire.
-            // XML uses Solace's XMLContentMessage so consumers can filter on the XML SMF header.
-            if (!SolaceConstants.MESSAGE_TYPE_TEXT.equals(messageType)
-                    && !SolaceConstants.MESSAGE_TYPE_BYTES.equals(messageType)
-                    && !SolaceConstants.MESSAGE_TYPE_XML.equals(messageType)) {
-                handleException("Unsupported messageType '" + messageType
-                        + "'. Supported types: TEXT, BYTES, XML.", messageContext);
-                return;
-            }
+        // Transacted sessions only carry guaranteed messages — DIRECT bypasses the spool
+        // and has no rollback semantics, so the JCSMP transacted producer rejects it.
+        if ((isTransactional || inboundOwned)
+                && SolaceConstants.DELIVERY_MODE_DIRECT.equalsIgnoreCase(deliveryMode)) {
+            handleException("Invalid delivery mode 'DIRECT' inside a transaction (txId=" + txId
+                    + ", destination='" + destinationName + "'). Transacted sessions only support"
+                    + " guaranteed delivery — use PERSISTENT or NON_PERSISTENT.",
+                    messageContext);
+            return;
+        }
 
-            // Get message payload and detect its content type for downstream subscribers
-            String[] payloadAndType = SolaceUtils.extractPayloadAndContentType(messageContext);
-            String payload = payloadAndType[0];
-            String httpContentType = payloadAndType[1];
+        String messageType = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.MESSAGE_TYPE);
+        if (StringUtils.isEmpty(messageType)) {
+            messageType = SolaceConstants.MESSAGE_TYPE_TEXT;
+        }
+        messageType = messageType.toUpperCase();
+        // Solace has no JSON message type — JSON payloads are carried as TEXT on the wire.
+        // XML uses Solace's XMLContentMessage so consumers can filter on the XML SMF header.
+        if (!SolaceConstants.MESSAGE_TYPE_TEXT.equals(messageType)
+                && !SolaceConstants.MESSAGE_TYPE_BYTES.equals(messageType)
+                && !SolaceConstants.MESSAGE_TYPE_XML.equals(messageType)) {
+            handleException("Unsupported messageType '" + messageType
+                    + "'. Supported types: TEXT, BYTES, XML.", messageContext);
+            return;
+        }
 
-            if (log.isDebugEnabled()) {
-                log.debug("Publishing message to Solace with parameters: destinationType=" + destinationType
-                        + ", destinationName=" + destinationName + ", deliveryMode=" + deliveryMode
-                        + ", messageType=" + messageType + ", httpContentType=" + httpContentType);
-            }
+        // Get message payload and detect its content type for downstream subscribers
+        String[] payloadAndType = SolaceUtils.extractPayloadAndContentType(messageContext);
+        String payload = payloadAndType[0];
+        String httpContentType = payloadAndType[1];
 
-            // Build optional message properties
-            SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext);
+        if (log.isDebugEnabled()) {
+            log.debug("Publishing message to Solace with parameters: destinationType=" + destinationType
+                    + ", destinationName=" + destinationName + ", deliveryMode=" + deliveryMode
+                    + ", messageType=" + messageType + ", httpContentType=" + httpContentType);
+        }
 
-            // Publish ACK wait (guaranteed mode only)
-            String waitForAckStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.WAIT_FOR_ACK);
-            boolean waitForAck = StringUtils.isNotEmpty(waitForAckStr) && Boolean.parseBoolean(waitForAckStr);
-            String ackTimeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.ACK_TIMEOUT);
-            long ackTimeout = SolaceUtils.parseLongOrDefault(ackTimeoutStr,
-                    SolaceConstants.DEFAULT_ACK_TIMEOUT_MS, SolaceConstants.ACK_TIMEOUT);
-            String continueOnAckFailureStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.CONTINUE_ON_ACK_FAILURE);
-            boolean continueOnAckFailure = StringUtils.isNotEmpty(continueOnAckFailureStr)
-                    && Boolean.parseBoolean(continueOnAckFailureStr);
+        // Build optional message properties
+        SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext);
 
-            if (isTransactional && waitForAck && log.isDebugEnabled()) {
-                log.debug("waitForAck=true is ignored for transacted publishes — atomicity is provided by solace.commit");
-            }
+        // Publish ACK wait (guaranteed mode only). The default is true for guaranteed delivery.
+        String waitForAckStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                SolaceConstants.WAIT_FOR_ACK);
+        boolean waitForAck = StringUtils.isEmpty(waitForAckStr) ? true : Boolean.parseBoolean(waitForAckStr);
+        String ackTimeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                SolaceConstants.ACK_TIMEOUT);
+        long ackTimeout = SolaceUtils.parseLongOrDefault(ackTimeoutStr,
+                SolaceConstants.DEFAULT_ACK_TIMEOUT_MS, SolaceConstants.ACK_TIMEOUT);
+        String continueOnAckFailureStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                SolaceConstants.CONTINUE_ON_ACK_FAILURE);
+        boolean continueOnAckFailure = StringUtils.isNotEmpty(continueOnAckFailureStr)
+                && Boolean.parseBoolean(continueOnAckFailureStr);
 
-            // Publish the message
+        if ((isTransactional || inboundOwned) && waitForAck && log.isDebugEnabled()) {
+            log.debug("waitForAck=true is ignored for transacted publishes — atomicity is provided by solace.commit");
+        }
+
+        // The command bodies run on the transaction's thread, so they capture the resolved values.
+        final String publishDestinationType = destinationType;
+        final String publishDeliveryMode = deliveryMode;
+        final String publishMessageType = messageType;
+
+        if (isTransactional) {
+            // Connector owned: the 1.0.1 transacted publish, now always on the transaction's executor thread.
+            final SolaceTransactionRegistry.Entry entry = transactionEntry;
             try {
-                PublishResult result;
-                if (isTransactional) {
-                    log.debug("solace.publishMessage: txId=" + txId + " sending transacted message to "
-                            + destinationType + " '" + destinationName + "' (deliveryMode=" + deliveryMode
-                            + ", messageType=" + messageType + ")");
-                    result = connection.publishTransacted(destinationType, destinationName, payload,
-                            deliveryMode, messageType, msgProperties, httpContentType, messageContext);
-                    log.info("solace.publishMessage: txId=" + txId + " transacted send queued (correlationKey="
-                            + result.getCorrelationKey() + ", ackStatus=" + result.getAckStatus() + ")");
-                } else {
-                    result = connection.publish(destinationType, destinationName, payload,
-                            deliveryMode, messageType, msgProperties, waitForAck, ackTimeout,
-                            httpContentType, messageContext);
-                }
-
+                log.debug("solace.publishMessage: txId=" + txId + " sending transacted message to "
+                        + destinationType + " '" + destinationName + "' (deliveryMode=" + deliveryMode
+                        + ", messageType=" + messageType + ")");
+                PublishResult result = TransactionBridge.submitAndWait(entry.executor,
+                        new TransactionCommand<>(() -> entry.connection.publishTransacted(publishDestinationType,
+                                destinationName, payload, publishDeliveryMode, publishMessageType, msgProperties,
+                                httpContentType, messageContext), ackTimeout),
+                        "publishMessage", FAULT_PUBLISH_ERROR, ERROR_CODE_PUBLISH_ERROR, messageContext);
+                log.info("solace.publishMessage: txId=" + txId + " transacted send queued (correlationKey="
+                        + result.getCorrelationKey() + ", ackStatus=" + result.getAckStatus() + ")");
                 if (log.isDebugEnabled()) {
                     log.debug("Message published to " + destinationType + " '" + destinationName
                             + "' (deliveryMode=" + deliveryMode + ", payloadLength="
                             + (payload != null ? payload.length() : 0)
                             + ", ackStatus=" + result.getAckStatus() + ")");
                 }
-
                 setResultInContext(messageContext, result, destinationType, destinationName, deliveryMode,
-                        messageType, responseVariable);
-
-                if (!isTransactional && !result.isAckReceived() && waitForAck && !continueOnAckFailure
-                        && (SolaceConstants.ACK_STATUS_NACK.equals(result.getAckStatus())
-                        || SolaceConstants.ACK_STATUS_TIMEOUT.equals(result.getAckStatus()))) {
-                    handleException("Publish failed for '" + destinationName + "': "
-                            + result.getAckStatus() + " — " + result.getError(), messageContext);
-                    return;
-                }
-            } catch (JCSMPException e) {
-                handleException("Error publishing message to Solace: " + e.getMessage(), e, messageContext);
+                        messageType, responseVariable, false);
+            } catch (SolaceFault fault) {
+                fault(fault, messageContext, responseVariable);
             }
+            return;
+        }
+
+        if (inboundOwned) {
+            // Inbound owned: the publish is a command on the inbound endpoint's producer. The result is the
+            // commit's, so the ack status is TX_PENDING.
+            final XMLMessageProducer producer = (XMLMessageProducer) messageContext.getProperty(
+                    SolaceConstants.SOLACE_INBOUND_TX_PRODUCER);
+            try {
+                PublishResult result = TransactionBridge.submitAndWait((Executor) inboundTx,
+                        new TransactionCommand<>(() -> {
+                            BytesXMLMessage message = MessageBuilder.createMessage(publishMessageType, payload,
+                                    messageContext);
+                            if (httpContentType != null && !httpContentType.isEmpty()) {
+                                message.setHTTPContentType(httpContentType);
+                            }
+                            MessageBuilder.applyDeliveryMode(message, publishDeliveryMode);
+                            MessageBuilder.applyMessageProperties(message, msgProperties);
+                            Destination destination = MessageBuilder.resolveDestination(publishDestinationType,
+                                    destinationName);
+                            String correlationKey = MessageBuilder.newCorrelationKey("tx");
+                            message.setCorrelationKey(correlationKey);
+                            producer.send(message, destination);
+                            return new PublishResult(SolaceConstants.ACK_STATUS_TX_PENDING, false, correlationKey,
+                                    null);
+                        }, ackTimeout),
+                        "publishMessage", FAULT_PUBLISH_ERROR, ERROR_CODE_PUBLISH_ERROR, messageContext);
+                setResultInContext(messageContext, result, destinationType, destinationName, deliveryMode,
+                        messageType, responseVariable, false);
+            } catch (SolaceFault fault) {
+                fault(fault, messageContext, responseVariable);
+            }
+            return;
+        }
+
+        SolaceLogicalConnection lc = LogicalConnections.get(connectionName);
+        if (lc == null) {
+            fault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                    "Solace connection '" + connectionName + "' is not initialised", null, messageContext);
+            return;
+        }
+        PublishOperation op = null;
+        SolaceConnection connection = null;
+        try {
+            // The first statement of the try, before the borrow. From here every exit goes through op.finish().
+            op = PublishOperation.register(lc, ackTimeout);
+            // Inside the try: a serialisation failure is a safe exit of the record.
+            BytesXMLMessage message = MessageBuilder.createMessage(messageType, payload, messageContext);
+            if (httpContentType != null && !httpContentType.isEmpty()) {
+                message.setHTTPContentType(httpContentType);
+            }
+            MessageBuilder.applyDeliveryMode(message, deliveryMode);
+            MessageBuilder.applyMessageProperties(message, msgProperties);
+            Destination destination = MessageBuilder.resolveDestination(destinationType, destinationName);
+            // Bounded by the pool's maxWaitTime.
+            connection = (SolaceConnection) handler.getConnection(SolaceConstants.CONNECTOR_NAME, connectionName);
+            if (!op.attach(connection)) {
+                // A refused session was never used.
+                throw new SolaceFault(FAULT_EXPIRED, ERROR_CODE_EXPIRED,
+                        "deadline passed while waiting for a pooled session", null, false);
+            }
+            // Connects the holder on first use, or rebuilds it. Bounded by the record's deadline.
+            connection.ensureSession(op);
+            PublishResult result = connection.publisher.send(op, message, destination, null, waitForAck);
+
+            if (log.isDebugEnabled()) {
+                log.debug("Message published to " + destinationType + " '" + destinationName
+                        + "' (deliveryMode=" + deliveryMode + ", payloadLength="
+                        + (payload != null ? payload.length() : 0)
+                        + ", ackStatus=" + result.getAckStatus() + ")");
+            }
+
+            setResultInContext(messageContext, result, destinationType, destinationName, deliveryMode,
+                    messageType, responseVariable, false);
+
+            if (!result.isAckReceived() && waitForAck && !continueOnAckFailure
+                    && SolaceConstants.ACK_STATUS_NACK.equals(result.getAckStatus())) {
+                throw new SolaceFault(FAULT_NACK, ERROR_CODE_NACK, result.getError());
+            }
+        } catch (SolaceFault fault) {
+            if (continueOnAckFailure && (FAULT_DEADLINE.equals(fault.name) || FAULT_UNKNOWN.equals(fault.name)
+                    || FAULT_EXPIRED.equals(fault.name))) {
+                setResultInContext(messageContext,
+                        new PublishResult(SolaceConstants.ACK_STATUS_TIMEOUT, false, null, fault.getMessage()),
+                        destinationType, destinationName, deliveryMode, messageType, responseVariable, true);
+            } else {
+                fault(fault, messageContext, responseVariable);
+            }
+        } catch (ConnectException e) {
+            // The pool was exhausted within maxWaitTime, or the borrow was refused by a closed logical connection.
+            fault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
+                    "Solace connection is not available: " + e.getMessage(), e, messageContext);
         } catch (Exception e) {
-            handleException("Solace publish operation failed (connection: " + connectionName + ")",
-                    e, messageContext);
+            fault(FAULT_PUBLISH_ERROR, ERROR_CODE_PUBLISH_ERROR,
+                    "Solace publish operation failed (connection: " + connectionName + ")", e, messageContext);
         } finally {
-            // Pinned (transactional) connection stays held until commit/rollback.
-            // Outer finally so early returns from validation also release the pooled connection.
-            if (!isTransactional && connection != null) {
-                handler.returnConnection(SolaceConstants.CONNECTOR_NAME, connectionName, connection);
+            // Terminal under the record's monitor before the pool return, so a running timer callback finds FAILED.
+            if (op != null) {
+                op.finish();
+            }
+            // An expired operation discards the session it had attached. A never attached session goes back healthy.
+            if (connection != null) {
+                if (op.expiredWith(connection.session)) {
+                    connection.failed = true;
+                }
+                connection.returnToPool();
             }
         }
     }
 
+    private void fault(SolaceFault fault, MessageContext messageContext, String responseVariable) {
+        if (fault.outcomeUnknown) {
+            Map<String, Object> attributes = new HashMap<>();
+            attributes.put("outcome", SolaceConstants.OUTCOME_UNKNOWN);
+            handleConnectorResponse(messageContext, responseVariable, false, new JSONObject(attributes).toString(),
+                    null, attributes);
+        }
+        fault(fault.name, fault.code, fault.getMessage(), fault.getCause(), messageContext);
+    }
+
+    private void fault(String name, int code, String message, Throwable cause, MessageContext messageContext) {
+        String text = name + ": " + message;
+        ConnectorUtils.setErrorPropertiesToMessage(messageContext, String.valueOf(code), text);
+        handleException(text, cause instanceof Exception ? (Exception) cause : null, messageContext);
+    }
+
     private void setResultInContext(MessageContext messageContext, PublishResult result,
                                     String destinationType, String destinationName, String deliveryMode,
-                                    String messageType, String responseVariable) {
+                                    String messageType, String responseVariable, boolean outcomeUnknown) {
         // Legacy solace.* context properties — kept for callers that read them directly.
         messageContext.setProperty(SolaceConstants.SOLACE_DESTINATION, destinationName);
         messageContext.setProperty(SolaceConstants.SOLACE_DELIVERY_MODE, deliveryMode);
@@ -239,6 +363,10 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
         }
         if (result.getError() != null) {
             attributes.put("error", result.getError());
+        }
+        // The deadline cut the operation off after send(): the message may or may not have reached the broker.
+        if (outcomeUnknown) {
+            attributes.put("outcome", SolaceConstants.OUTCOME_UNKNOWN);
         }
 
         JSONObject response = new JSONObject(attributes);
