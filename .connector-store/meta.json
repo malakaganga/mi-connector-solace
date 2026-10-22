@@ -66,7 +66,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Unused for browse \u2014 messages are returned via the response variable."
                         }
                     ],
@@ -94,7 +94,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the Message Body in Message Context with the response of the operation."
                         }
                     ],
@@ -157,7 +157,7 @@
                             "name": "waitForAck",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": true,
+                            "defaultValue": "true",
                             "description": "Wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT request before waiting for the reply. Ignored for DIRECT."
                         },
                         {
@@ -192,7 +192,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the Message Body in Message Context with the response."
                         }
                     ],
@@ -220,7 +220,7 @@
                             "name": "waitForAck",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": true,
+                            "defaultValue": "true",
                             "description": "Wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT reply before returning. Ignored for DIRECT."
                         },
                         {
@@ -255,7 +255,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the Message Body in Message Context with the response."
                         }
                     ],
@@ -290,7 +290,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the Message Body in Message Context with the response of the operation."
                         }
                     ],
@@ -381,21 +381,21 @@
                             "name": "dmqEligible",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": true,
+                            "defaultValue": "true",
                             "description": "Whether the message is eligible for the Dead Message Queue if it cannot be delivered."
                         },
                         {
                             "name": "elidingEligible",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Whether the message is eligible for eliding. When enabled, the broker may discard intermediate messages on a topic to reduce load."
                         },
                         {
                             "name": "waitForAck",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": true,
+                            "defaultValue": "true",
                             "description": "If true, block for the broker ACK before returning. Ack outcome is exposed via the 'solace.ack.status' property (ACK | NACK | TIMEOUT). Only applies to PERSISTENT and NON_PERSISTENT delivery modes."
                         },
                         {
@@ -409,7 +409,7 @@
                             "name": "continueOnAckFailure",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "When enabled, a NACK or ACK timeout will not throw. Inspect the 'solace.ack.status' property (ACK | NACK | TIMEOUT) to branch the flow. When disabled (default), failures throw and go to the fault sequence."
                         },
                         {
@@ -423,7 +423,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the Message Body in Message Context with the response of the operation."
                         }
                     ],
@@ -472,7 +472,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the message body in Message Context with the polled message's payload."
                         }
                     ],
@@ -500,7 +500,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the Message Body in Message Context with the response of the operation."
                         }
                     ],
@@ -563,7 +563,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Unused for cache request \u2014 messages are returned via the response variable."
                         }
                     ],
@@ -605,7 +605,7 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Replace the Message Body in Message Context with the response of the operation."
                         }
                     ],
@@ -796,42 +796,42 @@
                             "name": "sslValidateCertificate",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": true,
+                            "defaultValue": "true",
                             "description": "Whether to validate the broker's TLS certificate against the trust store. Keep this enabled. Disabling it turns off certificate verification and exposes the connection to man-in-the-middle attacks \u2014 not recommended for production."
                         },
                         {
                             "name": "sslValidateCertificateDate",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": true,
+                            "defaultValue": "true",
                             "description": "Whether to validate the certificate expiration date. Keep this enabled; disabling it allows expired certificates and is not recommended for production."
                         },
                         {
                             "name": "sslValidateHostname",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": true,
+                            "defaultValue": "true",
                             "description": "Whether to verify that the broker's certificate matches the host being connected to. Keep this enabled. Disabling it allows a valid certificate issued for a different host to be accepted, defeating man-in-the-middle protection \u2014 not recommended for production."
                         },
                         {
                             "name": "generateSendTimestamps",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Whether to automatically generate send timestamps on messages."
                         },
                         {
                             "name": "generateSequenceNumbers",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Whether to automatically generate sequence numbers on messages."
                         },
                         {
                             "name": "calculateMessageExpiration",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "Whether to calculate message expiration based on TTL."
                         },
                         {
@@ -901,7 +901,7 @@
                             "name": "clientNameStrict",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": false,
+                            "defaultValue": "false",
                             "description": "When enabled the Client Name is sent as given to the first pooled session and the other sessions append their role. When disabled every session name is the Client Name prefix followed by the node id, the connection name and the session's role."
                         },
                         {
