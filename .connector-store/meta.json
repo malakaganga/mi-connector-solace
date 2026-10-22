@@ -17,12 +17,285 @@
     ],
     "releases": [
         {
-            "tagName": "v1.0.1",
+            "tagName": "v2.0.0",
             "products": [
                 "MI 4.6.0",
                 "MI 4.7.0"
             ],
             "operations": [
+                {
+                    "name": "browse",
+                    "description": "Browse Queue",
+                    "params": [
+                        {
+                            "name": "queueName",
+                            "type": "stringOrExpression",
+                            "required": true,
+                            "defaultValue": "",
+                            "description": "Name of the queue to browse."
+                        },
+                        {
+                            "name": "maxMessages",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "10",
+                            "description": "Maximum number of messages to return. Default: 10."
+                        },
+                        {
+                            "name": "browseTimeout",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "2000",
+                            "description": "Maximum time to wait per message read in milliseconds. Browse stops once no message arrives within this window. Default: 2000."
+                        },
+                        {
+                            "name": "selector",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Optional JMS-style selector expression for filtering (e.g., region = 'EU' AND priority > 5). Leave blank to match any message."
+                        },
+                        {
+                            "name": "responseVariable",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "solaceBrowseResponse",
+                            "description": "Property name where the result JSON is stored. Contains: destination, messageCount, messages (array of message summaries with payload + headers)."
+                        },
+                        {
+                            "name": "overwriteBody",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": false,
+                            "description": "Unused for browse \u2014 messages are returned via the response variable."
+                        }
+                    ],
+                    "isHidden": false
+                },
+                {
+                    "name": "rollback",
+                    "description": "Rollback Transaction",
+                    "params": [
+                        {
+                            "name": "description",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Description of the operation."
+                        },
+                        {
+                            "name": "responseVariable",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "solaceResponse",
+                            "description": "Property name where the operation result is stored."
+                        },
+                        {
+                            "name": "overwriteBody",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": false,
+                            "description": "Replace the Message Body in Message Context with the response of the operation."
+                        }
+                    ],
+                    "isHidden": false
+                },
+                {
+                    "name": "beginTransaction",
+                    "description": "Begin Transaction",
+                    "params": [
+                        {
+                            "name": "transactionTimeoutMillis",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "60000",
+                            "description": "Auto-rollback after this many ms if commit/rollback isn't reached. Prevents leaks from forgotten or faulted sequences."
+                        }
+                    ],
+                    "isHidden": false
+                },
+                {
+                    "name": "sendRequest",
+                    "description": "Send Request",
+                    "params": [
+                        {
+                            "name": "destinationType",
+                            "type": "combo",
+                            "required": true,
+                            "defaultValue": "TOPIC",
+                            "description": "Destination type: TOPIC or QUEUE. Supported values: TOPIC, QUEUE"
+                        },
+                        {
+                            "name": "destinationName",
+                            "type": "stringOrExpression",
+                            "required": true,
+                            "defaultValue": "",
+                            "description": "Name of the topic or queue to send the request to."
+                        },
+                        {
+                            "name": "messageType",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "TEXT",
+                            "description": "Message type: TEXT, BYTES, or XML. JSON payloads are auto-detected and carried as TEXT. Supported values: TEXT, BYTES, XML"
+                        },
+                        {
+                            "name": "requestTimeout",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "30000",
+                            "description": "Maximum time to wait for response in milliseconds (default: 30000)."
+                        },
+                        {
+                            "name": "deliveryMode",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "DIRECT",
+                            "description": "Delivery mode. DIRECT is valid only for TOPIC destinations (best-effort pub/sub). QUEUE destinations require PERSISTENT or NON_PERSISTENT (guaranteed delivery). Supported values: DIRECT, PERSISTENT, NON_PERSISTENT"
+                        },
+                        {
+                            "name": "waitForAck",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": true,
+                            "description": "Wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT request before waiting for the reply. Ignored for DIRECT."
+                        },
+                        {
+                            "name": "ackTimeout",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "10000",
+                            "description": "Deadline in milliseconds for the send and the broker acknowledgement of the request. The Request Timeout bounds the whole operation."
+                        },
+                        {
+                            "name": "applicationMessageId",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Application-defined message ID."
+                        },
+                        {
+                            "name": "applicationMessageType",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Application-defined message type."
+                        },
+                        {
+                            "name": "responseVariable",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "solaceResponse",
+                            "description": "The name of the variable to which the output should be stored."
+                        },
+                        {
+                            "name": "overwriteBody",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": false,
+                            "description": "Replace the Message Body in Message Context with the response."
+                        }
+                    ],
+                    "isHidden": false
+                },
+                {
+                    "name": "sendReply",
+                    "description": "Send Reply",
+                    "params": [
+                        {
+                            "name": "target",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "INBOUND",
+                            "description": "INBOUND replies to the message the inbound endpoint stashed. POLL replies to the message stashed by a poll with ackMode=CLIENT. Supported values: INBOUND, POLL"
+                        },
+                        {
+                            "name": "deliveryMode",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "DIRECT",
+                            "description": "Delivery mode: DIRECT, PERSISTENT, or NON_PERSISTENT. Supported values: DIRECT, PERSISTENT, NON_PERSISTENT"
+                        },
+                        {
+                            "name": "waitForAck",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": true,
+                            "description": "Wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT reply before returning. Ignored for DIRECT."
+                        },
+                        {
+                            "name": "ackTimeout",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "10000",
+                            "description": "Deadline in milliseconds for the connect, the send and the broker acknowledgement of the reply."
+                        },
+                        {
+                            "name": "messageType",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "TEXT",
+                            "description": "Message type: TEXT, BYTES, or XML. JSON payloads are auto-detected and carried as TEXT. Supported values: TEXT, BYTES, XML"
+                        },
+                        {
+                            "name": "applicationMessageType",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Application-defined message type."
+                        },
+                        {
+                            "name": "responseVariable",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "solaceResponse",
+                            "description": "The name of the variable to which the output should be stored."
+                        },
+                        {
+                            "name": "overwriteBody",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": false,
+                            "description": "Replace the Message Body in Message Context with the response."
+                        }
+                    ],
+                    "isHidden": false
+                },
+                {
+                    "name": "acknowledgeMessage",
+                    "description": "Acknowledge Message",
+                    "params": [
+                        {
+                            "name": "target",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "INBOUND",
+                            "description": "INBOUND settles the inbound endpoint's message through its settlement handle. POLL settles the message stashed by a poll with ackMode=CLIENT. Supported values: INBOUND, POLL"
+                        },
+                        {
+                            "name": "description",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Description of the operation."
+                        },
+                        {
+                            "name": "responseVariable",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "solaceAckResponse",
+                            "description": "Property name where the operation result is stored."
+                        },
+                        {
+                            "name": "overwriteBody",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": false,
+                            "description": "Replace the Message Body in Message Context with the response of the operation."
+                        }
+                    ],
+                    "isHidden": false
+                },
                 {
                     "name": "publishMessage",
                     "description": "Publish Message",
@@ -108,21 +381,21 @@
                             "name": "dmqEligible",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "true",
+                            "defaultValue": true,
                             "description": "Whether the message is eligible for the Dead Message Queue if it cannot be delivered."
                         },
                         {
                             "name": "elidingEligible",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Whether the message is eligible for eliding. When enabled, the broker may discard intermediate messages on a topic to reduce load."
                         },
                         {
                             "name": "waitForAck",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": true,
                             "description": "If true, block for the broker ACK before returning. Ack outcome is exposed via the 'solace.ack.status' property (ACK | NACK | TIMEOUT). Only applies to PERSISTENT and NON_PERSISTENT delivery modes."
                         },
                         {
@@ -130,13 +403,13 @@
                             "type": "stringOrExpression",
                             "required": false,
                             "defaultValue": "10000",
-                            "description": "Maximum time in milliseconds to wait for the broker ACK when Wait For Ack is enabled."
+                            "description": "Deadline in milliseconds of the whole operation: the pool borrow, the session check, the send and the broker acknowledgement. Default 10000."
                         },
                         {
                             "name": "continueOnAckFailure",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "When enabled, a NACK or ACK timeout will not throw. Inspect the 'solace.ack.status' property (ACK | NACK | TIMEOUT) to branch the flow. When disabled (default), failures throw and go to the fault sequence."
                         },
                         {
@@ -150,8 +423,57 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Replace the Message Body in Message Context with the response of the operation."
+                        }
+                    ],
+                    "isHidden": false
+                },
+                {
+                    "name": "poll",
+                    "description": "Poll Message",
+                    "params": [
+                        {
+                            "name": "queueName",
+                            "type": "stringOrExpression",
+                            "required": true,
+                            "defaultValue": "",
+                            "description": "Name of the queue to poll."
+                        },
+                        {
+                            "name": "pollTimeout",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "5000",
+                            "description": "Maximum time to wait for a message in milliseconds. Default: 5000."
+                        },
+                        {
+                            "name": "ackMode",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "AUTO",
+                            "description": "AUTO acknowledges the message on the flow's owner thread right after it is handed to this call. CLIENT stashes the message under solace.poll.message for acknowledgeMessage or nackMessage with target=POLL, within the connection's pollAckTimeout. Supported values: AUTO, CLIENT"
+                        },
+                        {
+                            "name": "selector",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Optional JMS-style selector expression for filtering (e.g., region = 'EU' AND priority > 5). Leave blank to match any message."
+                        },
+                        {
+                            "name": "responseVariable",
+                            "type": "stringOrExpression",
+                            "required": false,
+                            "defaultValue": "solacePollResponse",
+                            "description": "Property name where the result JSON is stored. Contains: destination, received, timedOut, messageId, correlationId, payload, contentType, ackMode, leaseDeadline."
+                        },
+                        {
+                            "name": "overwriteBody",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": false,
+                            "description": "Replace the message body in Message Context with the polled message's payload."
                         }
                     ],
                     "isHidden": false
@@ -178,197 +500,8 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Replace the Message Body in Message Context with the response of the operation."
-                        }
-                    ],
-                    "isHidden": false
-                },
-                {
-                    "name": "beginTransaction",
-                    "description": "Begin Transaction",
-                    "params": [
-                        {
-                            "name": "transactionTimeoutMillis",
-                            "type": "string",
-                            "required": false,
-                            "defaultValue": "60000",
-                            "description": "Auto-rollback after this many ms if commit/rollback isn't reached. Prevents leaks from forgotten or faulted sequences."
-                        }
-                    ],
-                    "isHidden": false
-                },
-                {
-                    "name": "poll",
-                    "description": "Poll Message",
-                    "params": [
-                        {
-                            "name": "queueName",
-                            "type": "stringOrExpression",
-                            "required": true,
-                            "defaultValue": "",
-                            "description": "Name of the queue to poll."
-                        },
-                        {
-                            "name": "pollTimeout",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "5000",
-                            "description": "Maximum time to wait for a message in milliseconds. Default: 5000."
-                        },
-                        {
-                            "name": "selector",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "",
-                            "description": "Optional JMS-style selector expression for filtering (e.g., region = 'EU' AND priority > 5). Leave blank to match any message."
-                        },
-                        {
-                            "name": "responseVariable",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "solacePollResponse",
-                            "description": "Property name where the result JSON is stored. Contains: destination, received, timedOut, messageId, correlationId, payload, contentType."
-                        },
-                        {
-                            "name": "overwriteBody",
-                            "type": "boolean",
-                            "required": false,
-                            "defaultValue": "false",
-                            "description": "Replace the message body in Message Context with the polled message's payload."
-                        }
-                    ],
-                    "isHidden": false
-                },
-                {
-                    "name": "nackMessage",
-                    "description": "Nack Message",
-                    "params": [
-                        {
-                            "name": "outcomeType",
-                            "type": "combo",
-                            "required": true,
-                            "defaultValue": "FAILED",
-                            "description": "FAILED: broker redelivers the message (subject to max-redelivery, then DMQ if configured). REJECTED: broker routes immediately to DMQ, otherwise discards. Inbound endpoint must declare required settlement outcomes for this to work. Supported values: FAILED, REJECTED"
-                        },
-                        {
-                            "name": "description",
-                            "type": "string",
-                            "required": false,
-                            "defaultValue": "",
-                            "description": "Description of the operation."
-                        },
-                        {
-                            "name": "responseVariable",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "solaceNackResponse",
-                            "description": "Property name where the operation result is stored."
-                        },
-                        {
-                            "name": "overwriteBody",
-                            "type": "boolean",
-                            "required": false,
-                            "defaultValue": "false",
-                            "description": "Replace the Message Body in Message Context with the response of the operation."
-                        }
-                    ],
-                    "isHidden": false
-                },
-                {
-                    "name": "rollback",
-                    "description": "Rollback Transaction",
-                    "params": [
-                        {
-                            "name": "description",
-                            "type": "string",
-                            "required": false,
-                            "defaultValue": "",
-                            "description": "Description of the operation."
-                        },
-                        {
-                            "name": "responseVariable",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "solaceResponse",
-                            "description": "Property name where the operation result is stored."
-                        },
-                        {
-                            "name": "overwriteBody",
-                            "type": "boolean",
-                            "required": false,
-                            "defaultValue": "false",
-                            "description": "Replace the Message Body in Message Context with the response of the operation."
-                        }
-                    ],
-                    "isHidden": false
-                },
-                {
-                    "name": "sendRequest",
-                    "description": "Send Request",
-                    "params": [
-                        {
-                            "name": "destinationType",
-                            "type": "combo",
-                            "required": true,
-                            "defaultValue": "TOPIC",
-                            "description": "Destination type: TOPIC or QUEUE. Supported values: TOPIC, QUEUE"
-                        },
-                        {
-                            "name": "destinationName",
-                            "type": "stringOrExpression",
-                            "required": true,
-                            "defaultValue": "",
-                            "description": "Name of the topic or queue to send the request to."
-                        },
-                        {
-                            "name": "messageType",
-                            "type": "combo",
-                            "required": false,
-                            "defaultValue": "TEXT",
-                            "description": "Message type: TEXT, BYTES, or XML. JSON payloads are auto-detected and carried as TEXT. Supported values: TEXT, BYTES, XML"
-                        },
-                        {
-                            "name": "requestTimeout",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "30000",
-                            "description": "Maximum time to wait for response in milliseconds (default: 30000)."
-                        },
-                        {
-                            "name": "deliveryMode",
-                            "type": "combo",
-                            "required": false,
-                            "defaultValue": "DIRECT",
-                            "description": "Delivery mode. DIRECT is valid only for TOPIC destinations (best-effort pub/sub). QUEUE destinations require PERSISTENT or NON_PERSISTENT (guaranteed delivery). Supported values: DIRECT, PERSISTENT, NON_PERSISTENT"
-                        },
-                        {
-                            "name": "applicationMessageId",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "",
-                            "description": "Application-defined message ID."
-                        },
-                        {
-                            "name": "applicationMessageType",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "",
-                            "description": "Application-defined message type."
-                        },
-                        {
-                            "name": "responseVariable",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "solaceResponse",
-                            "description": "The name of the variable to which the output should be stored."
-                        },
-                        {
-                            "name": "overwriteBody",
-                            "type": "boolean",
-                            "required": false,
-                            "defaultValue": "false",
-                            "description": "Replace the Message Body in Message Context with the response."
                         }
                     ],
                     "isHidden": false
@@ -430,65 +563,30 @@
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Unused for cache request \u2014 messages are returned via the response variable."
                         }
                     ],
                     "isHidden": true
                 },
                 {
-                    "name": "browse",
-                    "description": "Browse Queue",
+                    "name": "nackMessage",
+                    "description": "Nack Message",
                     "params": [
                         {
-                            "name": "queueName",
-                            "type": "stringOrExpression",
+                            "name": "outcomeType",
+                            "type": "combo",
                             "required": true,
-                            "defaultValue": "",
-                            "description": "Name of the queue to browse."
+                            "defaultValue": "FAILED",
+                            "description": "FAILED: broker redelivers the message (subject to max-redelivery, then DMQ if configured). REJECTED: broker routes immediately to DMQ, otherwise discards. Inbound endpoint must declare required settlement outcomes for this to work. Supported values: FAILED, REJECTED"
                         },
                         {
-                            "name": "maxMessages",
-                            "type": "stringOrExpression",
+                            "name": "target",
+                            "type": "combo",
                             "required": false,
-                            "defaultValue": "10",
-                            "description": "Maximum number of messages to return. Default: 10."
+                            "defaultValue": "INBOUND",
+                            "description": "INBOUND settles the inbound endpoint's message through its settlement handle. POLL settles the message stashed by a poll with ackMode=CLIENT. Supported values: INBOUND, POLL"
                         },
-                        {
-                            "name": "browseTimeout",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "2000",
-                            "description": "Maximum time to wait per message read in milliseconds. Browse stops once no message arrives within this window. Default: 2000."
-                        },
-                        {
-                            "name": "selector",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "",
-                            "description": "Optional JMS-style selector expression for filtering (e.g., region = 'EU' AND priority > 5). Leave blank to match any message."
-                        },
-                        {
-                            "name": "responseVariable",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "solaceBrowseResponse",
-                            "description": "Property name where the result JSON is stored. Contains: destination, messageCount, messages (array of message summaries with payload + headers)."
-                        },
-                        {
-                            "name": "overwriteBody",
-                            "type": "boolean",
-                            "required": false,
-                            "defaultValue": "false",
-                            "description": "Unused for browse \u2014 messages are returned via the response variable."
-                        }
-                    ],
-                    "isHidden": false
-                },
-                {
-                    "name": "acknowledgeMessage",
-                    "description": "Acknowledge Message",
-                    "params": [
                         {
                             "name": "description",
                             "type": "string",
@@ -500,57 +598,15 @@
                             "name": "responseVariable",
                             "type": "stringOrExpression",
                             "required": false,
-                            "defaultValue": "solaceAckResponse",
+                            "defaultValue": "solaceNackResponse",
                             "description": "Property name where the operation result is stored."
                         },
                         {
                             "name": "overwriteBody",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Replace the Message Body in Message Context with the response of the operation."
-                        }
-                    ],
-                    "isHidden": false
-                },
-                {
-                    "name": "sendReply",
-                    "description": "Send Reply",
-                    "params": [
-                        {
-                            "name": "deliveryMode",
-                            "type": "combo",
-                            "required": false,
-                            "defaultValue": "DIRECT",
-                            "description": "Delivery mode: DIRECT, PERSISTENT, or NON_PERSISTENT. Supported values: DIRECT, PERSISTENT, NON_PERSISTENT"
-                        },
-                        {
-                            "name": "messageType",
-                            "type": "combo",
-                            "required": false,
-                            "defaultValue": "TEXT",
-                            "description": "Message type: TEXT, BYTES, or XML. JSON payloads are auto-detected and carried as TEXT. Supported values: TEXT, BYTES, XML"
-                        },
-                        {
-                            "name": "applicationMessageType",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "",
-                            "description": "Application-defined message type."
-                        },
-                        {
-                            "name": "responseVariable",
-                            "type": "stringOrExpression",
-                            "required": false,
-                            "defaultValue": "solaceResponse",
-                            "description": "The name of the variable to which the output should be stored."
-                        },
-                        {
-                            "name": "overwriteBody",
-                            "type": "boolean",
-                            "required": false,
-                            "defaultValue": "false",
-                            "description": "Replace the Message Body in Message Context with the response."
                         }
                     ],
                     "isHidden": false
@@ -636,7 +692,7 @@
                             "type": "string",
                             "required": false,
                             "defaultValue": "",
-                            "description": "Unique client name for the session (auto-generated if not provided)."
+                            "description": "Client name prefix. Each session of this connection appends the node, the connection name and a role suffix. Set clientNameStrict to send the name as given."
                         },
                         {
                             "name": "connectionTimeout",
@@ -740,43 +796,176 @@
                             "name": "sslValidateCertificate",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "true",
+                            "defaultValue": true,
                             "description": "Whether to validate the broker's TLS certificate against the trust store. Keep this enabled. Disabling it turns off certificate verification and exposes the connection to man-in-the-middle attacks \u2014 not recommended for production."
                         },
                         {
                             "name": "sslValidateCertificateDate",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "true",
+                            "defaultValue": true,
                             "description": "Whether to validate the certificate expiration date. Keep this enabled; disabling it allows expired certificates and is not recommended for production."
                         },
                         {
                             "name": "sslValidateHostname",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "true",
+                            "defaultValue": true,
                             "description": "Whether to verify that the broker's certificate matches the host being connected to. Keep this enabled. Disabling it allows a valid certificate issued for a different host to be accepted, defeating man-in-the-middle protection \u2014 not recommended for production."
                         },
                         {
                             "name": "generateSendTimestamps",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Whether to automatically generate send timestamps on messages."
                         },
                         {
                             "name": "generateSequenceNumbers",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Whether to automatically generate sequence numbers on messages."
                         },
                         {
                             "name": "calculateMessageExpiration",
                             "type": "boolean",
                             "required": false,
-                            "defaultValue": "false",
+                            "defaultValue": false,
                             "description": "Whether to calculate message expiration based on TTL."
+                        },
+                        {
+                            "name": "pollAckTimeout",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "180000",
+                            "description": "Lease of a message polled with ackMode=CLIENT. When it passes unsettled, the connector settles the message FAILED and the broker redelivers it."
+                        },
+                        {
+                            "name": "pollFlowIdleTimeout",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "60000",
+                            "description": "An idle poll flow with no outstanding lease is closed after this time."
+                        },
+                        {
+                            "name": "maxPollFlows",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "16",
+                            "description": "Poll flows cached per connection, one per queue and selector, each with its own owner thread. Beyond it the least recently used idle flow is evicted, and when none is idle the poll faults with POLL_FLOW_LIMIT."
+                        },
+                        {
+                            "name": "requireSettlementOutcomes",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "AUTO",
+                            "description": "AUTO requests the settlement outcomes the broker reports and, for a missing one, retains the message and recycles its flow so the broker redelivers it. TRUE fails the poll flow bind when the broker lacks FAILED or REJECTED. Supported values: AUTO, TRUE"
+                        },
+                        {
+                            "name": "maxConcurrentRequests",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "100",
+                            "description": "Concurrent sendRequest calls on the connection's request reply session. A call beyond it waits up to its requestTimeout and then faults with REQUEST_CONCURRENCY_EXCEEDED."
+                        },
+                        {
+                            "name": "recovery.initialDelay",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "1000",
+                            "description": "First delay before a failed session is rebuilt."
+                        },
+                        {
+                            "name": "recovery.progression",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "2.0",
+                            "description": "Multiplier applied to the delay after each failed rebuild attempt."
+                        },
+                        {
+                            "name": "recovery.maxDelay",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "60000",
+                            "description": "Upper bound of the rebuild delay."
+                        },
+                        {
+                            "name": "recovery.maxAttempts",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "-1",
+                            "description": "Rebuild attempts before the operation faults. -1 means unlimited within the operation's deadline."
+                        },
+                        {
+                            "name": "clientNameStrict",
+                            "type": "boolean",
+                            "required": false,
+                            "defaultValue": false,
+                            "description": "When enabled the Client Name is sent as given to the first pooled session and the other sessions append their role. When disabled every session name is the Client Name prefix followed by the node id, the connection name and the session's role."
+                        },
+                        {
+                            "name": "oauth2TokenFile",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Path of a file holding the OAuth2 access token. The token is read from the file at every connect and reconnect, so a sidecar can rotate it. Requires the OAUTH2 authentication scheme."
+                        },
+                        {
+                            "name": "keepAliveInterval",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Keep alive interval of the JCSMP sessions. Empty leaves the JCSMP default."
+                        },
+                        {
+                            "name": "keepAliveLimit",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Missed keep alive responses after which a JCSMP session is considered lost. Empty leaves the JCSMP default."
+                        },
+                        {
+                            "name": "maxActiveConnections",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "8",
+                            "description": "Maximum number of pooled sessions. The connection keeps at most twice this number of pooled physical sessions, counting those still connecting or being closed."
+                        },
+                        {
+                            "name": "maxIdleConnections",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "8",
+                            "description": "Maximum number of idle pooled sessions kept."
+                        },
+                        {
+                            "name": "maxWaitTime",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "10000",
+                            "description": "Time an operation waits for a pooled session before it faults. Zero or a negative value is replaced by 10000, because the pool would wait forever."
+                        },
+                        {
+                            "name": "minEvictionTime",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Time a pooled session may stay idle before the evictor may close it. Empty leaves the pool default."
+                        },
+                        {
+                            "name": "evictionCheckInterval",
+                            "type": "string",
+                            "required": false,
+                            "defaultValue": "",
+                            "description": "Interval between runs of the pool evictor. Empty leaves the evictor off."
+                        },
+                        {
+                            "name": "exhaustedAction",
+                            "type": "combo",
+                            "required": false,
+                            "defaultValue": "WHEN_EXHAUSTED_BLOCK",
+                            "description": "What a borrow does when every pooled session is in use. WHEN_EXHAUSTED_BLOCK waits up to Max Wait Time, WHEN_EXHAUSTED_FAIL faults at once, WHEN_EXHAUSTED_GROW creates one more session and removes the limit on pooled physical sessions. Supported values: WHEN_EXHAUSTED_BLOCK, WHEN_EXHAUSTED_FAIL, WHEN_EXHAUSTED_GROW"
                         }
                     ]
                 }
