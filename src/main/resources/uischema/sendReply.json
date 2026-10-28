@@ -101,7 +101,7 @@
                 "BYTES",
                 "XML"
               ],
-              "helpTip": "Message type: TEXT, BYTES, or XML. JSON payloads are auto-detected and carried as TEXT."
+              "helpTip": "Message type: TEXT, BYTES, or XML. The body is written by the platform formatter of its content type, and this value selects the Solace message class. JSON has no message class of its own. Send it as TEXT or BYTES."
             }
           },
           {

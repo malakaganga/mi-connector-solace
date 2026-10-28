@@ -248,8 +248,10 @@ public final class PayloadCodec {
      *
      * <p>The transfer of the request is checked, the body is built the way the mediators build it, and a binary
      * wrapper that holds base64 text gets a binary node. Then the formatter registered for the message type writes
-     * the bytes, and the transfer is checked again before anything is sent. A SOAP message type is written by the
-     * application/xml formatter, so the first body element is sent and not the envelope. A message type without a
+     * the bytes, and the transfer is checked again before anything is sent. A SOAP message type, or the stock SOAP
+     * formatter the platform selects, is written by the application/xml formatter, so the first body element is
+     * sent and not the envelope. A formatter that extends the SOAP formatter, such as the binary relay formatter of
+     * the pack, is a registered handler and writes the body itself. A message type without a
      * registered formatter is written by the formatter of its family: application/json for a JSON type,
      * application/xml for an XML type, text/plain for any other text type and application/octet-stream for
      * everything else. A context without a message type gets the formatter the platform selects.</p>
@@ -283,7 +285,9 @@ public final class PayloadCodec {
                 formatter = registeredFormatter(config, formatterType);
             }
         }
-        if (formatter instanceof SOAPMessageFormatter || HTTPConstants.MEDIA_TYPE_TEXT_XML.equals(messageType)
+        // Only the stock SOAP formatter is replaced. A subclass, such as the binary relay formatter, is kept.
+        if (formatter.getClass() == SOAPMessageFormatter.class
+                || HTTPConstants.MEDIA_TYPE_TEXT_XML.equals(messageType)
                 || HTTPConstants.MEDIA_TYPE_APPLICATION_SOAP_XML.equals(messageType)) {
             formatterType = CONTENT_TYPE_XML;
             formatter = registeredFormatter(config, formatterType);

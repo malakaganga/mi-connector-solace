@@ -21,7 +21,7 @@
     <parameter name="destinationType" description="Destination type: TOPIC or QUEUE (default: TOPIC)."/>
     <parameter name="destinationName" description="Name of the topic or queue to send the request to."/>
     <parameter name="deliveryMode" description="Delivery mode: DIRECT, PERSISTENT, or NON_PERSISTENT (default: DIRECT). PERSISTENT/NON_PERSISTENT use a temporary queue for guaranteed request-reply."/>
-    <parameter name="messageType" description="Message type: TEXT, BYTES, or XML (default: TEXT). JSON payloads are auto-detected and carried as TEXT."/>
+    <parameter name="messageType" description="Message type: TEXT, BYTES, or XML (default: TEXT). The body is written by the platform formatter of its content type, and this value selects the Solace message class. JSON has no message class of its own. Send it as TEXT or BYTES."/>
     <parameter name="requestTimeout" description="Maximum time to wait for response in milliseconds (default: 30000)."/>
     <parameter name="correlationId" description="Correlation ID for the request message."/>
     <parameter name="priority" description="Message priority (0-255)."/>

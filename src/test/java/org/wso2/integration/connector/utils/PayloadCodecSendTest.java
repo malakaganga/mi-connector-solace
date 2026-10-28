@@ -20,6 +20,8 @@ package org.wso2.integration.connector.utils;
 
 import com.solacesystems.jcsmp.BytesMessage;
 import com.solacesystems.jcsmp.BytesXMLMessage;
+import com.solacesystems.jcsmp.JCSMPFactory;
+import com.solacesystems.jcsmp.TextMessage;
 import org.apache.axiom.attachments.ByteArrayDataSource;
 import org.apache.axiom.om.OMAbstractFactory;
 import org.apache.axiom.om.OMElement;
@@ -33,11 +35,15 @@ import org.apache.axis2.AxisFault;
 import org.apache.axis2.Constants;
 import org.apache.axis2.context.MessageContext;
 import org.apache.axis2.engine.AxisConfiguration;
+import org.apache.axis2.format.BinaryBuilder;
+import org.apache.axis2.format.BinaryFormatter;
 import org.apache.axis2.format.PlainTextFormatter;
 import org.apache.axis2.transport.base.BaseConstants;
 import org.apache.axis2.transport.http.ApplicationXMLFormatter;
+import org.apache.axis2.transport.http.MultipartFormDataFormatter;
 import org.apache.axis2.transport.http.SOAPMessageFormatter;
 import org.apache.http.nio.ContentDecoder;
+import org.apache.synapse.commons.formatters.XFormURLEncodedFormatter;
 import org.apache.synapse.commons.json.JsonUtil;
 import org.apache.synapse.config.SynapseConfiguration;
 import org.apache.synapse.core.axis2.Axis2MessageContext;
@@ -45,6 +51,8 @@ import org.apache.synapse.transport.passthru.PassThroughConstants;
 import org.apache.synapse.transport.passthru.Pipe;
 import org.apache.synapse.transport.passthru.util.ControlledByteBuffer;
 import org.junit.Test;
+import org.wso2.carbon.relay.BinaryRelayBuilder;
+import org.wso2.carbon.relay.ExpandingMessageFormatter;
 import org.wso2.integration.connector.SolaceFault;
 import org.wso2.integration.connector.connection.MessageBuilder;
 import org.wso2.integration.connector.constants.SolaceConstants;
@@ -386,6 +394,53 @@ public class PayloadCodecSendTest {
     }
 
     @Test
+    public void thePackBinaryRelayFormatterWritesTheBytes() throws Exception {
+        // application/binary is the control, the pack registers the plain binary formatter for it.
+        byte[] raw = {0, 1, 2, 0x0D, 0x0A, (byte) 0xFF};
+        for (String type : new String[] {"application/octet-stream", "application/pdf", "application/msword",
+                "application/x-unknown", "application/binary"}) {
+            PayloadCodec.Outgoing outgoing = relayRoundTrip(bytesMessage(raw, type));
+            assertTrue(type, outgoing.binary);
+            assertArrayEquals(type, raw, outgoing.bytes);
+            assertEquals(type, type, outgoing.mediaType);
+        }
+
+        // Both form declarations go out as their bytes, received as a BytesMessage and as a TextMessage.
+        String[] forms = {"x=caf%E9",
+                "--abc\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\ncaf\u00e9\r\n--abc--\r\n"};
+        String[] formTypes = {"application/x-www-form-urlencoded", "multipart/form-data; boundary=abc"};
+        for (int i = 0; i < forms.length; i++) {
+            for (String charset : new String[] {"UTF-8", "ISO-8859-1"}) {
+                String declared = formTypes[i] + "; charset=" + charset;
+                byte[] data = forms[i].getBytes(charset);
+                for (BytesXMLMessage message : new BytesXMLMessage[] {bytesMessage(data, declared),
+                        textMessage(forms[i], declared)}) {
+                    PayloadCodec.Outgoing outgoing = relayRoundTrip(message);
+                    assertTrue(declared, outgoing.binary);
+                    assertArrayEquals(declared, data, outgoing.bytes);
+                    assertEquals(declared, declared, outgoing.contentType());
+                }
+            }
+        }
+
+        // A binary wrapper that holds base64 text, the way the File connector leaves a read.
+        Axis2MessageContext file = relayContext();
+        OMElement wrapper = FACTORY.createOMElement(BaseConstants.DEFAULT_BINARY_WRAPPER);
+        wrapper.setText("AAEC/w==");
+        file.getAxis2MessageContext().getEnvelope().getBody().addChild(wrapper);
+        file.getAxis2MessageContext().setProperty(PassThroughConstants.MESSAGE_BUILDER_INVOKED, Boolean.TRUE);
+        setType(file, "application/octet-stream");
+        assertArrayEquals(new byte[] {0, 1, 2, (byte) 0xFF}, PayloadCodec.readOutgoing(file, OPERATION).bytes);
+
+        // The stock SOAP formatter is still replaced, so the first body element is sent.
+        Axis2MessageContext soap = relayContext();
+        soap.getAxis2MessageContext().setEnvelope(envelope(OMAbstractFactory.getSOAP11Factory()));
+        setType(soap, "text/xml");
+        assertEquals("<a>1</a>", new String(PayloadCodec.readOutgoing(soap, OPERATION).bytes,
+                StandardCharsets.UTF_8));
+    }
+
+    @Test
     public void theBodyIsPreservedForASecondOperation() throws Exception {
         Axis2MessageContext synCtx = context();
         MessageContext axis2Mc = synCtx.getAxis2MessageContext();
@@ -436,6 +491,47 @@ public class PayloadCodecSendTest {
 
     private static Axis2MessageContext context() throws Exception {
         return new Axis2MessageContext(BodyInstallerTest.context(), new SynapseConfiguration(), null);
+    }
+
+    /** A context with the binary, document and form handlers the pack registers in axis2.xml. */
+    private static Axis2MessageContext relayContext() throws Exception {
+        Axis2MessageContext synCtx = context();
+        AxisConfiguration config = config(synCtx.getAxis2MessageContext());
+        for (String type : new String[] {"application/octet-stream", "application/pdf", "application/msword"}) {
+            config.addMessageBuilder(type, new BinaryRelayBuilder());
+            config.addMessageFormatter(type, new ExpandingMessageFormatter());
+        }
+        config.addMessageBuilder("application/binary", new BinaryBuilder());
+        config.addMessageFormatter("application/binary", new BinaryFormatter());
+        config.addMessageFormatter("application/x-www-form-urlencoded", new XFormURLEncodedFormatter());
+        config.addMessageFormatter("multipart/form-data", new MultipartFormDataFormatter());
+        config.addMessageFormatter("text/xml", new SOAPMessageFormatter());
+        return synCtx;
+    }
+
+    /** Installs a received message as poll does with overwriteBody, then writes it twice. */
+    private static PayloadCodec.Outgoing relayRoundTrip(BytesXMLMessage message) throws Exception {
+        Axis2MessageContext synCtx = relayContext();
+        BodyInstaller.install(synCtx.getAxis2MessageContext(), PayloadCodec.decode(message, "poll"), "poll");
+        PayloadCodec.Outgoing first = PayloadCodec.readOutgoing(synCtx, OPERATION);
+        PayloadCodec.Outgoing second = PayloadCodec.readOutgoing(synCtx, "sendRequest");
+        assertArrayEquals(first.bytes, second.bytes);
+        assertEquals(first.contentType(), second.contentType());
+        return first;
+    }
+
+    private static BytesMessage bytesMessage(byte[] data, String type) {
+        BytesMessage message = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
+        message.setData(data);
+        message.setHTTPContentType(type);
+        return message;
+    }
+
+    private static TextMessage textMessage(String text, String type) {
+        TextMessage message = JCSMPFactory.onlyInstance().createMessage(TextMessage.class);
+        message.setText(text);
+        message.setHTTPContentType(type);
+        return message;
     }
 
     private static Axis2MessageContext textContext(String text, String charset) throws Exception {

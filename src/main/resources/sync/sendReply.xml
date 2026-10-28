@@ -20,7 +20,7 @@
     <parameter name="name" description="The Solace connection name to use."/>
     <parameter name="target" description="INBOUND (default) replies to the message the inbound endpoint stashed. POLL replies to the message stashed by a poll with ackMode=CLIENT."/>
     <parameter name="deliveryMode" description="Delivery mode: DIRECT, PERSISTENT, or NON_PERSISTENT (default: DIRECT)."/>
-    <parameter name="messageType" description="Message type: TEXT, BYTES, or XML (default: TEXT). JSON payloads are auto-detected and carried as TEXT."/>
+    <parameter name="messageType" description="Message type: TEXT, BYTES, or XML (default: TEXT). The body is written by the platform formatter of its content type, and this value selects the Solace message class. JSON has no message class of its own. Send it as TEXT or BYTES."/>
     <parameter name="correlationId" description="Correlation ID for the reply message. If omitted, the correlation ID from the inbound request is echoed."/>
     <parameter name="priority" description="Message priority (0-255)."/>
     <parameter name="timeToLive" description="Time to live in milliseconds."/>
