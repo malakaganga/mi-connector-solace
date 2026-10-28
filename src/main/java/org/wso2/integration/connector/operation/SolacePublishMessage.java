@@ -174,6 +174,11 @@ public class SolacePublishMessage extends AbstractConnectorOperation {
         } catch (SolaceFault fault) {
             fault(fault, messageContext, responseVariable);
             return;
+        } catch (RuntimeException e) {
+            // Any other failure while the message is built is a publish failure, as in 2.0.0. Nothing is sent.
+            fault(FAULT_PUBLISH_ERROR, ERROR_CODE_PUBLISH_ERROR,
+                    "Solace publish operation failed (connection: " + connectionName + ")", e, messageContext);
+            return;
         }
 
         if (log.isDebugEnabled()) {

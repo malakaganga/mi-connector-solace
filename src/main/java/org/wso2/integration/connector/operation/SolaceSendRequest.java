@@ -149,6 +149,10 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
         } catch (SolaceFault fault) {
             fault(fault.name, fault.code, fault.getMessage(), fault.getCause(), messageContext);
             return;
+        } catch (RuntimeException e) {
+            // Any other failure while the request is built is reported as in 2.0.0. Nothing is sent.
+            handleException("Failed to execute sendRequest operation: " + e.getMessage(), e, messageContext);
+            return;
         }
 
         String txId = (String) ((Axis2MessageContext) messageContext).getAxis2MessageContext()

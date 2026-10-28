@@ -20,6 +20,8 @@ package org.wso2.integration.connector.operation;
 
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.JCSMPException;
+import com.solacesystems.jcsmp.MapMessage;
+import com.solacesystems.jcsmp.StreamMessage;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
@@ -171,7 +173,14 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
             fields.put(SolaceConstants.RESULT_PAYLOAD_ENCODING, SolaceConstants.PAYLOAD_ENCODING_BASE64);
         }
         JSONObject summary = new JSONObject(fields);
-        summary.put("payload", received.summaryText());
+        if (message instanceof MapMessage) {
+            // A structured body is its parsed value, as on poll. Any other body keeps its summary text.
+            summary.put("payload", new JSONObject(received.text));
+        } else if (message instanceof StreamMessage) {
+            summary.put("payload", new JSONArray(received.text));
+        } else {
+            summary.put("payload", received.summaryText());
+        }
         return summary;
     }
 }

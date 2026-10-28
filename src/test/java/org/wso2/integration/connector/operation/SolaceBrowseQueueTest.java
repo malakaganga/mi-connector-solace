@@ -21,6 +21,10 @@ package org.wso2.integration.connector.operation;
 import com.solacesystems.jcsmp.BytesMessage;
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.JCSMPFactory;
+import com.solacesystems.jcsmp.MapMessage;
+import com.solacesystems.jcsmp.SDTMap;
+import com.solacesystems.jcsmp.SDTStream;
+import com.solacesystems.jcsmp.StreamMessage;
 import com.solacesystems.jcsmp.TextMessage;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -31,6 +35,7 @@ import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 /**
  * The summaries of a browse over messages in memory. The browser itself needs a broker and is not covered here.
@@ -64,6 +69,35 @@ public class SolaceBrowseQueueTest {
         assertEquals("c2", middle.getString("correlationId"));
         assertFalse(middle.has("payload"));
         assertFalse(middle.has(SolaceConstants.RESULT_CONTENT_TYPE));
+    }
+
+    @Test
+    public void aMapOrStreamMessageIsItsParsedValue() throws Exception {
+        SDTMap map = JCSMPFactory.onlyInstance().createMap();
+        map.putString("s", "str");
+        map.putLong("l", 7L);
+        map.putBoolean("b", true);
+        MapMessage mapMessage = JCSMPFactory.onlyInstance().createMessage(MapMessage.class);
+        mapMessage.setMap(map);
+        SDTStream stream = JCSMPFactory.onlyInstance().createStream();
+        stream.writeString("one");
+        stream.writeInteger(2);
+        StreamMessage streamMessage = JCSMPFactory.onlyInstance().createMessage(StreamMessage.class);
+        streamMessage.setStream(stream);
+
+        JSONArray items = SolaceBrowseQueue.summarise(
+                Arrays.<BytesXMLMessage>asList(mapMessage, streamMessage, text("{\"a\":1}", "json")), null);
+
+        JSONObject parsedMap = items.getJSONObject(0).getJSONObject("payload");
+        assertEquals("str", parsedMap.getString("s"));
+        assertEquals(7L, parsedMap.getLong("l"));
+        assertTrue(parsedMap.getBoolean("b"));
+        assertEquals("application/json", items.getJSONObject(0).getString(SolaceConstants.RESULT_CONTENT_TYPE));
+        JSONArray parsedStream = items.getJSONObject(1).getJSONArray("payload");
+        assertEquals("one", parsedStream.getString(0));
+        assertEquals(2, parsedStream.getInt(1));
+        // A text body keeps its summary text, also when it looks like JSON.
+        assertEquals("{\"a\":1}", items.getJSONObject(2).getString("payload"));
     }
 
     private static TextMessage text(String body, String applicationMessageId) {

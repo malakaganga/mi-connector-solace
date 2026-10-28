@@ -18,15 +18,14 @@
 
 package org.wso2.integration.connector.utils;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import com.google.gson.Strictness;
-import com.google.gson.stream.JsonReader;
-import com.google.gson.stream.JsonToken;
 import com.solacesystems.common.util.ByteArray;
 import com.solacesystems.jcsmp.BytesMessage;
 import com.solacesystems.jcsmp.BytesXMLMessage;
@@ -72,7 +71,6 @@ import org.wso2.integration.connector.SolaceFault;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.StringReader;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -127,6 +125,9 @@ public final class PayloadCodec {
     private static final String UNTYPED_BODY_NOT_BUILT = "the request has no Content-Type and its body was not "
             + "built, declare a Content-Type on the client or set ContentType before the first content aware mediator";
     // A formatter of the pack that is not on the class path of the connector is named.
+    // The platform carries two copies of gson, and a reader of one given to a parser of the other fails with a
+    // loader constraint error. So JSON is parsed through a Gson instance and never with the stream package.
+    private static final Gson STRICT_JSON = new GsonBuilder().setStrictness(Strictness.STRICT).create();
     private static final String MI_JSON_STREAM_FORMATTER = "org.wso2.micro.integrator.core.json.JsonStreamFormatter";
     /** The stock formatters that write characters. Their subclasses write characters too. */
     private static final Set<String> CHARACTER_FORMATTERS = new HashSet<>(Arrays.asList(
@@ -251,7 +252,9 @@ public final class PayloadCodec {
      * the bytes, and the transfer is checked again before anything is sent. A SOAP message type, or the stock SOAP
      * formatter the platform selects, is written by the application/xml formatter, so the first body element is
      * sent and not the envelope. A formatter that extends the SOAP formatter, such as the binary relay formatter of
-     * the pack, is a registered handler and writes the body itself. A message type without a
+     * the pack, writes a binary element itself. Any other body, an empty one as well, it would write as an envelope,
+     * so there the application/xml formatter writes the bytes and the selected formatter still names the content
+     * type. A message type without a
      * registered formatter is written by the formatter of its family: application/json for a JSON type,
      * application/xml for an XML type, text/plain for any other text type and application/octet-stream for
      * everything else. A context without a message type gets the formatter the platform selects.</p>
@@ -259,7 +262,8 @@ public final class PayloadCodec {
      * <p>The text, XML and JSON formatters write UTF-8, and a reporting encoder converts the bytes when the
      * charset of the context is another one. Binary and multipart bytes are never converted. Any other formatter
      * writes with the charset of the context. The content type is the one the formatter reports, with one charset
-     * parameter.</p>
+     * parameter. When the formatter reports no media type, a binary body gets application/octet-stream and any
+     * other body the type that selected the formatter.</p>
      */
     public static Outgoing readOutgoing(MessageContext synCtx, String operation) throws SolaceFault {
         org.apache.axis2.context.MessageContext axis2Mc = ((Axis2MessageContext) synCtx).getAxis2MessageContext();
@@ -285,8 +289,13 @@ public final class PayloadCodec {
                 formatter = registeredFormatter(config, formatterType);
             }
         }
-        // Only the stock SOAP formatter is replaced. A subclass, such as the binary relay formatter, is kept.
-        if (formatter.getClass() == SOAPMessageFormatter.class
+        // A subclass of the SOAP formatter, such as the binary relay formatter, writes a binary element itself. It
+        // writes any other body, an empty one as well, as a SOAP envelope, so there the XML formatter writes the
+        // bytes, and the selected formatter still decides binary and names the content type.
+        MessageFormatter selected = formatter;
+        boolean soapFormatter = formatter instanceof SOAPMessageFormatter
+                && (formatter.getClass() == SOAPMessageFormatter.class || !isBinaryWrapper(firstElement(axis2Mc)));
+        if (soapFormatter
                 || HTTPConstants.MEDIA_TYPE_TEXT_XML.equals(messageType)
                 || HTTPConstants.MEDIA_TYPE_APPLICATION_SOAP_XML.equals(messageType)) {
             formatterType = CONTENT_TYPE_XML;
@@ -295,7 +304,7 @@ public final class PayloadCodec {
 
         MessageFormatter binaryFormatter = config.getMessageFormatter(CONTENT_TYPE_OCTET_STREAM);
         boolean binary = formatter instanceof BinaryFormatter
-                || (binaryFormatter != null && binaryFormatter.getClass() == formatter.getClass())
+                || (binaryFormatter != null && binaryFormatter.getClass() == selected.getClass())
                 || isBinaryWrapper(firstElement(axis2Mc));
         boolean multipart = formatter instanceof MultipartFormDataFormatter
                 || (formatterType != null && formatterType.startsWith(MULTIPART_PREFIX));
@@ -323,12 +332,16 @@ public final class PayloadCodec {
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         String reported = write(axis2Mc, formatter, format, out, wireCharset, transcoded, operation);
+        if (binary && selected != formatter) {
+            reported = selected.getContentType(axis2Mc, format, axis2Mc.getSoapAction());
+        }
         byte[] bytes = out.toByteArray();
         if (convert) {
             bytes = encode(decode(bytes, StandardCharsets.UTF_8.name(), operation), wireCharset, operation);
         }
-        String contentType = wireContentType(reported, binary ? CONTENT_TYPE_OCTET_STREAM : CONTENT_TYPE_TEXT,
-                transcoded || form ? wireCharset : null);
+        String fallback = binary ? CONTENT_TYPE_OCTET_STREAM
+                : formatterType != null ? formatterType : CONTENT_TYPE_TEXT;
+        String contentType = wireContentType(reported, fallback, transcoded || form ? wireCharset : null);
 
         checkTransfer(axis2Mc, operation);
         return new Outgoing(bytes, contentType, wireCharset, binary);
@@ -387,6 +400,11 @@ public final class PayloadCodec {
     private static String wireContentType(String reported, String fallback, String writtenCharset) {
         String described = StringUtils.isBlank(reported) ? fallback : reported.trim();
         MediaType type = MediaType.parse(described);
+        if (type == null) {
+            // A formatter that reads an empty content type reports only its charset parameter.
+            described = fallback;
+            type = MediaType.parse(described);
+        }
         if (writtenCharset != null) {
             return type.withCharset(writtenCharset);
         }
@@ -717,10 +735,8 @@ public final class PayloadCodec {
             return null;
         }
         try {
-            JsonReader reader = new JsonReader(new StringReader(text));
-            reader.setStrictness(Strictness.STRICT);
-            JsonElement element = JsonParser.parseReader(reader);
-            return reader.peek() == JsonToken.END_DOCUMENT ? element : null;
+            // The instance reads one value and faults when the document is not fully consumed.
+            return STRICT_JSON.fromJson(text, JsonElement.class);
         } catch (Exception e) {
             return null;
         }

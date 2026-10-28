@@ -441,6 +441,39 @@ public class PayloadCodecSendTest {
     }
 
     @Test
+    public void theBinaryRelayFormatterNeverWritesAnEnvelope() throws Exception {
+        // An empty request body under a binary type has no binary element and goes out as no bytes.
+        Axis2MessageContext empty = relayContext();
+        setType(empty, "application/octet-stream");
+        PayloadCodec.Outgoing none = PayloadCodec.readOutgoing(empty, OPERATION);
+        assertEquals(0, none.length());
+        assertTrue(none.binary);
+        assertEquals("application/octet-stream", none.contentType());
+
+        // Any other element under a binary type is sent as the element and not inside an envelope.
+        Axis2MessageContext xml = relayContext();
+        xml.getAxis2MessageContext().getEnvelope().getBody().addChild(AXIOMUtil.stringToOM("<a>1</a>"));
+        setType(xml, "application/pdf");
+        PayloadCodec.Outgoing element = PayloadCodec.readOutgoing(xml, OPERATION);
+        assertEquals("<a>1</a>", new String(element.bytes, StandardCharsets.UTF_8));
+        assertEquals("application/pdf", element.contentType());
+    }
+
+    @Test
+    public void anEmptyContentTypeGetsTheTypeThatSelectedTheFormatter() throws Exception {
+        // A request without a Content-Type header whose body a sequence built as XML.
+        Axis2MessageContext synCtx = context();
+        MessageContext axis2Mc = synCtx.getAxis2MessageContext();
+        axis2Mc.getEnvelope().getBody().addChild(AXIOMUtil.stringToOM("<order><id>42</id></order>"));
+        axis2Mc.setProperty(Constants.Configuration.MESSAGE_TYPE, "application/xml");
+        axis2Mc.setProperty(Constants.Configuration.CONTENT_TYPE, "");
+
+        PayloadCodec.Outgoing outgoing = PayloadCodec.readOutgoing(synCtx, OPERATION);
+        assertEquals("application/xml; charset=UTF-8", outgoing.contentType());
+        assertEquals("<order><id>42</id></order>", new String(outgoing.bytes, StandardCharsets.UTF_8));
+    }
+
+    @Test
     public void theBodyIsPreservedForASecondOperation() throws Exception {
         Axis2MessageContext synCtx = context();
         MessageContext axis2Mc = synCtx.getAxis2MessageContext();
