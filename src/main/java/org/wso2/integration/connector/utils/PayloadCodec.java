@@ -128,6 +128,7 @@ public final class PayloadCodec {
     // The platform carries two copies of gson, and a reader of one given to a parser of the other fails with a
     // loader constraint error. So JSON is parsed through a Gson instance and never with the stream package.
     private static final Gson STRICT_JSON = new GsonBuilder().setStrictness(Strictness.STRICT).create();
+    private static final String BINARY_RELAY_FORMATTER = "org.wso2.carbon.relay.ExpandingMessageFormatter";
     private static final String MI_JSON_STREAM_FORMATTER = "org.wso2.micro.integrator.core.json.JsonStreamFormatter";
     /** The stock formatters that write characters. Their subclasses write characters too. */
     private static final Set<String> CHARACTER_FORMATTERS = new HashSet<>(Arrays.asList(
@@ -251,10 +252,10 @@ public final class PayloadCodec {
      * wrapper that holds base64 text gets a binary node. Then the formatter registered for the message type writes
      * the bytes, and the transfer is checked again before anything is sent. A SOAP message type, or the stock SOAP
      * formatter the platform selects, is written by the application/xml formatter, so the first body element is
-     * sent and not the envelope. A formatter that extends the SOAP formatter, such as the binary relay formatter of
-     * the pack, writes a binary element itself. Any other body, an empty one as well, it would write as an envelope,
-     * so there the application/xml formatter writes the bytes and the selected formatter still names the content
-     * type. A message type without a
+     * sent and not the envelope. The binary relay formatter of the pack writes a binary element itself and any other
+     * body, an empty one as well, as an envelope, so for those bodies the application/xml formatter writes the bytes
+     * and the relay formatter still names the content type. Any other subclass of the SOAP formatter is a registered
+     * handler and writes the body itself. A message type without a
      * registered formatter is written by the formatter of its family: application/json for a JSON type,
      * application/xml for an XML type, text/plain for any other text type and application/octet-stream for
      * everything else. A context without a message type gets the formatter the platform selects.</p>
@@ -289,12 +290,14 @@ public final class PayloadCodec {
                 formatter = registeredFormatter(config, formatterType);
             }
         }
-        // A subclass of the SOAP formatter, such as the binary relay formatter, writes a binary element itself. It
-        // writes any other body, an empty one as well, as a SOAP envelope, so there the XML formatter writes the
-        // bytes, and the selected formatter still decides binary and names the content type.
+        // The stock SOAP formatter is replaced. The pack's binary relay formatter writes a binary element itself and
+        // any other body, an empty one as well, as a SOAP envelope, so for those bodies the XML formatter writes the
+        // bytes and the relay formatter still decides binary and names the content type. Any other subclass of the
+        // SOAP formatter is a registered handler and writes the body itself.
         MessageFormatter selected = formatter;
-        boolean soapFormatter = formatter instanceof SOAPMessageFormatter
-                && (formatter.getClass() == SOAPMessageFormatter.class || !isBinaryWrapper(firstElement(axis2Mc)));
+        boolean soapFormatter = formatter.getClass() == SOAPMessageFormatter.class
+                || (BINARY_RELAY_FORMATTER.equals(formatter.getClass().getName())
+                        && !isBinaryWrapper(firstElement(axis2Mc)));
         if (soapFormatter
                 || HTTPConstants.MEDIA_TYPE_TEXT_XML.equals(messageType)
                 || HTTPConstants.MEDIA_TYPE_APPLICATION_SOAP_XML.equals(messageType)) {

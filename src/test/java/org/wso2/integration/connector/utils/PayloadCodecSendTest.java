@@ -57,6 +57,7 @@ import org.wso2.integration.connector.SolaceFault;
 import org.wso2.integration.connector.connection.MessageBuilder;
 import org.wso2.integration.connector.constants.SolaceConstants;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -460,6 +461,29 @@ public class PayloadCodecSendTest {
     }
 
     @Test
+    public void aRegisteredSoapFormatterSubclassWritesItsOwnBody() throws Exception {
+        // Only the pack's binary relay formatter falls back for a body that is not binary. Another subclass of the
+        // SOAP formatter is a registered handler: its writer runs, for a normal body and for an empty one.
+        for (String body : new String[] {"<value>caf\u00e9</value>", null}) {
+            Axis2MessageContext synCtx = relayContext();
+            CustomSoapFormatter custom = new CustomSoapFormatter();
+            config(synCtx.getAxis2MessageContext()).addMessageFormatter("application/x-custom", custom);
+            if (body != null) {
+                synCtx.getAxis2MessageContext().getEnvelope().getBody().addChild(AXIOMUtil.stringToOM(body));
+            }
+            setType(synCtx, "application/x-custom");
+
+            PayloadCodec.Outgoing first = PayloadCodec.readOutgoing(synCtx, OPERATION);
+            PayloadCodec.Outgoing second = PayloadCodec.readOutgoing(synCtx, "sendRequest");
+            String expected = body == null ? "custom=" : "custom=caf\u00e9";
+            assertEquals(expected, new String(first.bytes, StandardCharsets.UTF_8));
+            assertArrayEquals(first.bytes, second.bytes);
+            assertEquals("application/x-custom", first.contentType());
+            assertEquals(2, custom.writes);
+        }
+    }
+
+    @Test
     public void anEmptyContentTypeGetsTheTypeThatSelectedTheFormatter() throws Exception {
         // A request without a Content-Type header whose body a sequence built as XML.
         Axis2MessageContext synCtx = context();
@@ -506,6 +530,30 @@ public class PayloadCodecSendTest {
             if (pipe != null) {
                 pipe.producerError();
             }
+        }
+    }
+
+    /** A registered handler that extends the SOAP formatter and writes its own representation of the body. */
+    private static final class CustomSoapFormatter extends SOAPMessageFormatter {
+
+        int writes;
+
+        @Override
+        public void writeTo(MessageContext messageContext, OMOutputFormat format, OutputStream outputStream,
+                            boolean preserve) throws AxisFault {
+            writes++;
+            OMElement first = messageContext.getEnvelope().getBody().getFirstElement();
+            try {
+                outputStream.write(("custom=" + (first == null ? "" : first.getText()))
+                        .getBytes(StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                throw AxisFault.makeFault(e);
+            }
+        }
+
+        @Override
+        public String getContentType(MessageContext messageContext, OMOutputFormat format, String soapAction) {
+            return "application/x-custom";
         }
     }
 
