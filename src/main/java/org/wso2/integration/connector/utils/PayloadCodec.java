@@ -374,9 +374,8 @@ public final class PayloadCodec {
             formatter.writeTo(axis2Mc, format, out, true);
             return formatter.getContentType(axis2Mc, format, axis2Mc.getSoapAction());
         } catch (AxisFault | RuntimeException e) {
-            throw new SolaceFault(FAULT_PAYLOAD_ERROR, ERROR_CODE_PAYLOAD_ERROR,
-                    operation + ": cannot read the message body through the " + formatter.getClass().getSimpleName()
-                            + ": " + e.getMessage(), e);
+            throw bodyFault(operation + ": cannot read the message body through the "
+                    + formatter.getClass().getSimpleName(), e);
         } finally {
             if (xmlFormatter) {
                 if (previousDeclaration == null) {
@@ -449,8 +448,7 @@ public final class PayloadCodec {
         try {
             RelayUtils.buildMessage(axis2Mc);
         } catch (IOException | XMLStreamException | OMException e) {
-            throw new SolaceFault(FAULT_PAYLOAD_ERROR, ERROR_CODE_PAYLOAD_ERROR,
-                    operation + ": cannot build the message body: " + e.getMessage(), e);
+            throw bodyFault(operation + ": cannot build the message body", e);
         }
         // With the passthrough builder disabled nothing builds the entity, and an empty body is never published.
         if (pipe != null && !Boolean.TRUE.equals(axis2Mc.getProperty(PassThroughConstants.MESSAGE_BUILDER_INVOKED))
@@ -725,6 +723,29 @@ public final class PayloadCodec {
             return JsonNull.INSTANCE;
         }
         return received.responseValue();
+    }
+
+    /**
+     * The fault of a body that cannot be built or written: 700124 with the parser's own description. The parser's
+     * exception is logged here and not chained into the fault. The platform rewrites the error code of any fault whose
+     * stack trace shows a parser exception to its own message parsing error, so the fault sequence would never see
+     * 700124.
+     */
+    static SolaceFault bodyFault(String message, Exception e) {
+        if (log.isDebugEnabled()) {
+            log.debug(message, e);
+        }
+        return new SolaceFault(FAULT_PAYLOAD_ERROR, ERROR_CODE_PAYLOAD_ERROR, message + ": " + rootMessage(e));
+    }
+
+    /** The message of the deepest cause on one line. It never names an exception class. */
+    private static String rootMessage(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        String message = root.getMessage();
+        return message == null ? "no further detail" : message.replaceAll("\\s*\\R\\s*", " ").trim();
     }
 
     // JSON and SDT conversion

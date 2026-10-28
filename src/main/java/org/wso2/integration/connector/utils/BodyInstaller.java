@@ -30,7 +30,6 @@ import org.apache.axis2.context.MessageContext;
 import org.apache.axis2.context.OperationContext;
 import org.apache.axis2.format.DataSourceMessageBuilder;
 import org.apache.axis2.format.PlainTextBuilder;
-import org.apache.axis2.transport.MessageFormatter;
 import org.apache.axis2.transport.TransportUtils;
 import org.apache.axis2.transport.http.HTTPConstants;
 import org.apache.commons.logging.Log;
@@ -225,7 +224,7 @@ public final class BodyInstaller {
             throw buildFault(declared, e, operation);
         }
 
-        describeBody(axis2Ctx, messageType, type, declaration, canonical);
+        describeBody(axis2Ctx, messageType, declaration, canonical);
         axis2Ctx.setProperty(INSTALLED_BODY, new InstalledBody(envelope, envelope.getBody().getFirstElement()));
         if (log.isDebugEnabled()) {
             log.debug(operation + ": the body of content type " + declared + " is built by "
@@ -275,18 +274,13 @@ public final class BodyInstaller {
 
     /**
      * Describes the new body after the build. The message type is the key of the formatter that will write it.
-     * ContentType and the transport Content-Type header are the complete type, with its charset, and no platform
-     * path appends a second charset. A formatter that appends the charset whatever the flag says gets ContentType
-     * without its charset, the charset stays in the character set encoding property.
+     * ContentType and the transport Content-Type header are the complete type, with its charset. With
+     * setCharacterEncoding false the HTTP paths that read ContentType send it as it is, with no second charset.
      */
-    private static void describeBody(MessageContext axis2Ctx, String messageType, MediaType type,
-                                     String declaration, boolean canonical) {
-        MessageFormatter formatter = axis2Ctx.getConfigurationContext().getAxisConfiguration()
-                .getMessageFormatter(messageType);
-        String contentType = canonical && formatter != null && isSubclassOf(formatter, LEGACY_JSON_FORMATTER)
-                ? type.withoutCharset() : declaration;
+    private static void describeBody(MessageContext axis2Ctx, String messageType, String declaration,
+                                     boolean canonical) {
         axis2Ctx.setProperty(Constants.Configuration.MESSAGE_TYPE, messageType);
-        axis2Ctx.setProperty(Constants.Configuration.CONTENT_TYPE, contentType);
+        axis2Ctx.setProperty(Constants.Configuration.CONTENT_TYPE, declaration);
         axis2Ctx.setProperty(Constants.Configuration.SET_CONTENT_TYPE_CHARACTER_ENCODING, Boolean.FALSE.toString());
 
         Object headers = axis2Ctx.getProperty(MessageContext.TRANSPORT_HEADERS);
@@ -340,8 +334,7 @@ public final class BodyInstaller {
     }
 
     private static SolaceFault buildFault(String declared, Exception e, String operation) {
-        return new SolaceFault(FAULT_PAYLOAD_ERROR, ERROR_CODE_PAYLOAD_ERROR, operation
-                + ": cannot set the received body declared " + declared + " as the message body: " + e.getMessage(),
-                e);
+        return PayloadCodec.bodyFault(operation + ": cannot set the received body declared " + declared
+                + " as the message body", e);
     }
 }

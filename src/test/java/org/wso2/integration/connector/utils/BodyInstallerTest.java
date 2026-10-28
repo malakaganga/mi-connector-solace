@@ -31,6 +31,7 @@ import org.apache.axiom.om.OMException;
 import org.apache.axiom.om.OMFactory;
 import org.apache.axiom.om.OMOutputFormat;
 import org.apache.axiom.om.OMText;
+import org.apache.axiom.om.util.AXIOMUtil;
 import org.apache.axis2.Constants;
 import org.apache.axis2.builder.ApplicationXMLBuilder;
 import org.apache.axis2.builder.MultipartFormDataBuilder;
@@ -52,9 +53,11 @@ import org.apache.axis2.transport.http.ApplicationXMLFormatter;
 import org.apache.axis2.transport.http.HTTPConstants;
 import org.apache.synapse.commons.json.JsonStreamBuilder;
 import org.apache.synapse.commons.json.JsonStreamFormatter;
+import org.apache.synapse.SynapseException;
 import org.apache.synapse.commons.json.JsonUtil;
 import org.apache.synapse.config.SynapseConfiguration;
 import org.apache.synapse.core.axis2.Axis2MessageContext;
+import org.apache.synapse.mediators.AbstractListMediator;
 import org.apache.synapse.transport.nhttp.NhttpConstants;
 import org.apache.synapse.transport.passthru.PassThroughConstants;
 import org.apache.synapse.transport.passthru.util.DeferredMessageBuilder;
@@ -65,14 +68,19 @@ import org.wso2.integration.connector.constants.SolaceConstants;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import javax.activation.DataHandler;
 
 import static org.apache.synapse.commons.json.Constants.JSON_STRING;
@@ -122,6 +130,30 @@ public class BodyInstallerTest {
         }
 
         assertPayloadFault(() -> install(context(), text("not xml", "application/xml")));
+    }
+
+    @Test
+    public void aBuildFailureKeepsItsCodeWhenThePlatformHandlesTheFault() throws Exception {
+        // The control: a fault that chains the parser's exception is rewritten by the platform.
+        Exception parser = null;
+        try {
+            AXIOMUtil.stringToOM("not xml");
+        } catch (Exception e) {
+            parser = e;
+        }
+        assertTrue(platformSeesAParserFailure(new SolaceFault(SolaceConstants.FAULT_PAYLOAD_ERROR,
+                SolaceConstants.ERROR_CODE_PAYLOAD_ERROR, "poll: " + parser.getMessage(), parser)));
+        try {
+            install(context(), text("not xml", "application/xml"));
+            fail("expected PAYLOAD_ERROR");
+        } catch (SolaceFault fault) {
+            assertEquals(SolaceConstants.ERROR_CODE_PAYLOAD_ERROR, fault.code);
+            assertNull(fault.getCause());
+            assertTrue(fault.getMessage(), fault.getMessage().startsWith(
+                    "poll: cannot set the received body declared application/xml as the message body: "));
+            assertTrue(fault.getMessage(), fault.getMessage().contains("Unexpected character 'n'"));
+            assertFalse(fault.getMessage(), platformSeesAParserFailure(fault));
+        }
     }
 
     @Test
@@ -421,7 +453,7 @@ public class BodyInstallerTest {
     }
 
     @Test
-    public void validBadgerfishIsBuiltAndItsContentTypeCarriesNoCharset() throws Exception {
+    public void validBadgerfishIsBuiltAndItsContentTypeCarriesOneCharset() throws Exception {
         MessageContext ctx = context();
         Map<String, Object> headers = new HashMap<>();
         ctx.setProperty(MessageContext.TRANSPORT_HEADERS, headers);
@@ -431,25 +463,61 @@ public class BodyInstallerTest {
         assertEquals("a", first.getLocalName());
         assertEquals("café", first.getText());
         assertEquals("application/json/badgerfish", ctx.getProperty(Constants.Configuration.MESSAGE_TYPE));
-        assertEquals("application/json/badgerfish; v=1", ctx.getProperty(Constants.Configuration.CONTENT_TYPE));
         assertEquals(UTF_8, ctx.getProperty(Constants.Configuration.CHARACTER_SET_ENCODING));
-        assertEquals("application/json/badgerfish; v=1; charset=UTF-8",
-                headers.get(HTTPConstants.HEADER_CONTENT_TYPE));
+        assertDescribedWithOneCharset(ctx, headers, "application/json/badgerfish; v=1; charset=UTF-8");
     }
 
     @Test
-    public void javascriptKeepsItsParametersWithoutCharsetInContentType() throws Exception {
+    public void javascriptKeepsItsParametersAndOneCharsetInContentType() throws Exception {
         MessageContext ctx = context();
+        Map<String, Object> headers = new HashMap<>();
+        ctx.setProperty(MessageContext.TRANSPORT_HEADERS, headers);
         install(ctx, text("{\"a\":\"1\"}", "text/javascript; v=1"));
         assertEquals("text/javascript", ctx.getProperty(Constants.Configuration.MESSAGE_TYPE));
-        assertEquals("text/javascript; v=1", ctx.getProperty(Constants.Configuration.CONTENT_TYPE));
         assertEquals(UTF_8, ctx.getProperty(Constants.Configuration.CHARACTER_SET_ENCODING));
+        assertDescribedWithOneCharset(ctx, headers, "text/javascript; v=1; charset=UTF-8");
     }
 
     // Helpers
 
+    /**
+     * ContentType and the transport Content-Type header are the same complete type with one charset, and
+     * setCharacterEncoding is false. The HTTP paths that read ContentType send it as it is.
+     */
+    private static void assertDescribedWithOneCharset(MessageContext ctx, Map<String, Object> headers,
+                                                      String expected) {
+        String contentType = (String) ctx.getProperty(Constants.Configuration.CONTENT_TYPE);
+        String header = (String) headers.get(HTTPConstants.HEADER_CONTENT_TYPE);
+        assertEquals(expected, contentType);
+        assertEquals(contentType, header);
+        assertEquals(contentType, 1, charsetCount(contentType));
+        assertEquals(header, 1, charsetCount(header));
+        assertEquals(Boolean.FALSE.toString(),
+                ctx.getProperty(Constants.Configuration.SET_CONTENT_TYPE_CHARACTER_ENCODING));
+    }
+
+    /** The number of charset parameters a content type names. */
+    static int charsetCount(String contentType) {
+        return contentType.toLowerCase(Locale.ROOT).split("charset=", -1).length - 1;
+    }
+
     private interface Install {
         void run() throws Exception;
+    }
+
+    /**
+     * Whether the platform would replace the fault's code with its own message parsing error. The connector throws
+     * the fault as a SynapseException with the fault's cause, the class mediator wraps it, and the list mediator
+     * matches its build failure pattern against the whole stack trace.
+     */
+    static boolean platformSeesAParserFailure(SolaceFault fault) throws Exception {
+        Field field = AbstractListMediator.class.getDeclaredField("MSG_BUILD_FAILURE_EXCEPTION_PATTERN");
+        field.setAccessible(true);
+        Throwable thrown = new SynapseException("Error occured in the mediation of the class mediator",
+                new SynapseException(fault.name + ": " + fault.getMessage(), fault.getCause()));
+        StringWriter trace = new StringWriter();
+        thrown.printStackTrace(new PrintWriter(trace));
+        return Pattern.compile((String) field.get(null)).matcher(trace.toString()).find();
     }
 
     private static void install(MessageContext ctx, BytesXMLMessage message) throws SolaceFault {

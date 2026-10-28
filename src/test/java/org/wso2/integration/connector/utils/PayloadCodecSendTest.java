@@ -272,6 +272,33 @@ public class PayloadCodecSendTest {
     }
 
     @Test
+    public void aLegacyJsonBodyInstalledByPollGoesOutAsTextWithOneCharset() throws Exception {
+        // ContentType of the installed body carries its charset and the legacy JSON formatter appends the
+        // charset of the output format again. The wire content type keeps one.
+        String[][] cases = {
+                {"text/javascript; v=1", "{\"a\":\"café\"}", "text/javascript; v=1; charset=UTF-8"},
+                {"application/json/badgerfish; v=1", "{\"a\":{\"$\":\"café\"}}",
+                        "application/json/badgerfish; v=1; charset=UTF-8"}};
+        for (String[] row : cases) {
+            Axis2MessageContext synCtx = context();
+            MessageContext axis2Mc = synCtx.getAxis2MessageContext();
+            BodyInstaller.install(axis2Mc, PayloadCodec.decode(textMessage(row[1], row[0]), "poll"), "poll");
+            assertEquals(row[0], row[2], axis2Mc.getProperty(Constants.Configuration.CONTENT_TYPE));
+            OMOutputFormat format = new OMOutputFormat();
+            format.setCharSetEncoding(StandardCharsets.UTF_8.name());
+            String reported = config(axis2Mc).getMessageFormatter(MediaType.baseTypeOf(row[0]))
+                    .getContentType(axis2Mc, format, null);
+            assertEquals(reported, 2, BodyInstallerTest.charsetCount(reported));
+
+            PayloadCodec.Outgoing payload = PayloadCodec.readOutgoing(synCtx, OPERATION);
+            assertEquals(row[0], row[2], payload.contentType());
+            assertEquals(row[0], 1, BodyInstallerTest.charsetCount(payload.contentType()));
+            TextMessage message = (TextMessage) MessageBuilder.createMessage("TEXT", payload, synCtx, OPERATION);
+            assertEquals(row[0], row[1], message.getText());
+        }
+    }
+
+    @Test
     public void anUntouchedUntypedRequestIsBuiltAsOctetStream() throws Exception {
         Axis2MessageContext synCtx = context();
         MessageContext axis2Mc = synCtx.getAxis2MessageContext();
@@ -495,6 +522,23 @@ public class PayloadCodecSendTest {
         PayloadCodec.Outgoing outgoing = PayloadCodec.readOutgoing(synCtx, OPERATION);
         assertEquals("application/xml; charset=UTF-8", outgoing.contentType());
         assertEquals("<order><id>42</id></order>", new String(outgoing.bytes, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    public void aBodyThatFailsInTheFormatterKeepsItsCodeWhenThePlatformHandlesTheFault() throws Exception {
+        Axis2MessageContext synCtx = context();
+        BodyInstaller.install(synCtx.getAxis2MessageContext(),
+                PayloadCodec.decode(textMessage("<root><item>value</root>", "application/xml"), "poll"), "poll");
+        try {
+            PayloadCodec.readOutgoing(synCtx, OPERATION);
+            fail("expected PAYLOAD_ERROR");
+        } catch (SolaceFault fault) {
+            assertEquals(SolaceConstants.ERROR_CODE_PAYLOAD_ERROR, fault.code);
+            assertNull(fault.getCause());
+            assertTrue(fault.getMessage(), fault.getMessage().startsWith(
+                    OPERATION + ": cannot read the message body through the "));
+            assertFalse(fault.getMessage(), BodyInstallerTest.platformSeesAParserFailure(fault));
+        }
     }
 
     @Test

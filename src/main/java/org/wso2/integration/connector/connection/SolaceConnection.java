@@ -540,6 +540,7 @@ public class SolaceConnection implements Connection {
             }
             log.debug("Committing transacted session on connection: " + connectionId);
             try {
+                closeTransactedFlowsInternal();
                 txSession.commit();
                 log.debug("Transaction committed on connection: " + connectionId);
             } catch (JCSMPException e) {
@@ -562,6 +563,7 @@ public class SolaceConnection implements Connection {
             }
             log.debug("Rolling back transacted session on connection: " + connectionId);
             try {
+                closeTransactedFlowsInternal();
                 txSession.rollback();
                 log.warn("Transaction rolled back on connection: " + connectionId);
             } catch (JCSMPException e) {
@@ -581,9 +583,12 @@ public class SolaceConnection implements Connection {
         }
     }
 
-    private void closeTransactedSessionInternal() {
-        // Close any transacted FlowReceivers first — they live on the txSession and would
-        // otherwise be orphaned by closing the session out from under them.
+    /**
+     * Closes the transacted flows. The commit and the rollback call it before they complete the transaction: a flow
+     * still open while they run takes the next message into its window, or the rolled back message again, and its close
+     * then returns that message with one more delivery counted on the broker.
+     */
+    private void closeTransactedFlowsInternal() {
         if (!txFlowReceivers.isEmpty()) {
             for (Map.Entry<String, TxFlowEntry> entry : txFlowReceivers.entrySet()) {
                 try {
@@ -596,6 +601,11 @@ public class SolaceConnection implements Connection {
             }
             txFlowReceivers.clear();
         }
+    }
+
+    private void closeTransactedSessionInternal() {
+        // The transacted flows live on the txSession, so they are closed before it.
+        closeTransactedFlowsInternal();
         if (txProducer != null) {
             txProducer.close();
             txProducer = null;
