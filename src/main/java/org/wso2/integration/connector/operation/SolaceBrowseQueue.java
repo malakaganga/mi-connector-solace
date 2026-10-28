@@ -33,9 +33,10 @@ import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnectorOperation;
 import org.wso2.integration.connector.core.connection.ConnectionHandler;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
+import org.wso2.integration.connector.utils.OperationParameters;
+import org.wso2.integration.connector.utils.PayloadCodec;
 import org.wso2.integration.connector.utils.SolaceUtils;
 
-import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,10 +45,19 @@ import java.util.Map;
  * Browses messages on a Solace queue without consuming them. Returns a JSON array of
  * message summaries on the response variable. The queue is left undisturbed — live
  * consumers continue to see the same messages.
+ *
+ * <p>Each summary carries the attributes of the metadata helper and the body as the payload codec
+ * ({@link PayloadCodec}) reads it: text as it is, binary as base64 text with {@code payloadEncoding}. The
+ * content type of every message is the {@code contentType} parameter, else the declared type, else the default
+ * of the class. The parameter is checked before the browse starts.</p>
  */
 public class SolaceBrowseQueue extends AbstractConnectorOperation {
 
     private static final Log log = LogFactory.getLog(SolaceBrowseQueue.class);
+
+    // The attributes of an item whose payload the codec could not convert.
+    static final String RESULT_PAYLOAD_ERROR_CODE = "payloadErrorCode";
+    static final String RESULT_PAYLOAD_ERROR_MESSAGE = "payloadErrorMessage";
 
     @Override
     public void execute(MessageContext messageContext, String responseVariable, Boolean overwriteBody) {
@@ -60,10 +70,21 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
         ConnectionHandler handler = ConnectionHandler.getConnectionHandler();
         SolaceConnection connection = null;
         try {
-            String timeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.BROWSE_TIMEOUT);
-            long timeout = SolaceUtils.parseLongOrDefault(timeoutStr,
-                    SolaceConstants.DEFAULT_BROWSE_TIMEOUT_MS, SolaceConstants.BROWSE_TIMEOUT);
+            // Every parameter is parsed before the borrow, so a bad value never reaches the broker.
+            int timeout = OperationParameters.intValue(messageContext, SolaceConstants.BROWSE_TIMEOUT,
+                    SolaceConstants.DEFAULT_BROWSE_TIMEOUT_MS, 1, Integer.MAX_VALUE);
+            int maxMessages = OperationParameters.intValue(messageContext, SolaceConstants.MAX_MESSAGES,
+                    SolaceConstants.DEFAULT_BROWSE_MAX_MESSAGES, 1, Integer.MAX_VALUE);
+            // The reader override, applied to every summarised message.
+            String contentType = OperationParameters.contentType(messageContext);
+            String queueName = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                    SolaceConstants.QUEUE_NAME);
+            if (StringUtils.isEmpty(queueName)) {
+                handleException("Queue name is required for browse operation.", messageContext);
+                return;
+            }
+            String selector = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
+                    SolaceConstants.SELECTOR);
 
             connection = (SolaceConnection) handler.getConnection(SolaceConstants.CONNECTOR_NAME, connectionName);
             // The first call after the borrow: connects the holder on first use, or rebuilds it.
@@ -73,25 +94,6 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
                 return;
             }
 
-            String queueName = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.QUEUE_NAME);
-            if (StringUtils.isEmpty(queueName)) {
-                handleException("Queue name is required for browse operation.", messageContext);
-                return;
-            }
-
-            String maxMessagesStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.MAX_MESSAGES);
-            int maxMessages = SolaceUtils.parseIntOrDefault(maxMessagesStr,
-                    SolaceConstants.DEFAULT_BROWSE_MAX_MESSAGES, SolaceConstants.MAX_MESSAGES);
-            if (maxMessages <= 0) {
-                handleException("maxMessages must be > 0 (got " + maxMessages + ").", messageContext);
-                return;
-            }
-
-            String selector = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.SELECTOR);
-
             if (log.isDebugEnabled()) {
                 log.debug("Browsing queue '" + queueName + "' (maxMessages=" + maxMessages
                         + ", timeout=" + timeout + "ms"
@@ -99,10 +101,7 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
             }
 
             List<BytesXMLMessage> browsed = connection.browseQueue(queueName, maxMessages, timeout, selector);
-            JSONArray messagesJson = new JSONArray();
-            for (BytesXMLMessage msg : browsed) {
-                messagesJson.put(toSummary(msg));
-            }
+            JSONArray messagesJson = summarise(browsed, contentType);
 
             messageContext.setProperty(SolaceConstants.SOLACE_DESTINATION, queueName);
 
@@ -133,7 +132,23 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
         }
     }
 
-    private JSONObject toSummary(BytesXMLMessage message) {
+    /**
+     * The summaries of the browsed messages in their order. A message whose payload cannot be converted is
+     * reported on its own item and the browse continues. Nothing is acknowledged or removed.
+     */
+    static JSONArray summarise(List<BytesXMLMessage> browsed, String contentType) {
+        JSONArray summaries = new JSONArray();
+        for (BytesXMLMessage message : browsed) {
+            summaries.put(toSummary(message, contentType));
+        }
+        return summaries;
+    }
+
+    /**
+     * The summary of one message. When its payload cannot be converted, the item keeps its message id and its
+     * metadata, carries the error code and the fault message, and has no payload.
+     */
+    static JSONObject toSummary(BytesXMLMessage message, String contentType) {
         // Pre-fill the destination from the message's Destination object (browse always
         // returns this, unlike a polled message where the queue name is the parameter)
         // so populateMessageMetadata's putIfAbsent leaves it alone.
@@ -143,15 +158,20 @@ public class SolaceBrowseQueue extends AbstractConnectorOperation {
         }
         SolaceUtils.populateMessageMetadata(message, fields);
 
-        JSONObject summary = new JSONObject(fields);
-
-        byte[] bytes = SolaceUtils.extractRawPayload(message);
-        summary.put("payload", new String(bytes, StandardCharsets.UTF_8));
-        String contentType = message.getHTTPContentType();
-        if (StringUtils.isEmpty(contentType)) {
-            contentType = SolaceUtils.inferContentType(message);
+        PayloadCodec.Received received;
+        try {
+            received = PayloadCodec.decode(message, contentType, "browse");
+        } catch (SolaceFault fault) {
+            fields.put(RESULT_PAYLOAD_ERROR_CODE, fault.code);
+            fields.put(RESULT_PAYLOAD_ERROR_MESSAGE, fault.getMessage());
+            return new JSONObject(fields);
         }
-        summary.put("contentType", contentType);
+        fields.put(SolaceConstants.RESULT_CONTENT_TYPE, received.contentType);
+        if (received.isBinary()) {
+            fields.put(SolaceConstants.RESULT_PAYLOAD_ENCODING, SolaceConstants.PAYLOAD_ENCODING_BASE64);
+        }
+        JSONObject summary = new JSONObject(fields);
+        summary.put("payload", received.summaryText());
         return summary;
     }
 }

@@ -6,11 +6,11 @@
   "properties": {
     "payload": {
       "type": ["object", "array", "string", "number", "boolean", "null"],
-      "description": "The reply message content received from the responder. JSON replies are parsed into an object or array; non-JSON replies (text, XML, binary) are surfaced as a string. Inspect attributes.contentType to determine how to interpret it."
+      "description": "The reply content, read by the reply's message class and content type: the contentType parameter, else the type the reply declares, else the default of its class. A body read as application/json or a +json type is the parsed JSON value, any JSON value. Any other text is a string, a TextMessage without a declared type included, whatever its body. A MapMessage or StreamMessage is a JSON object or array. Binary is a base64 string and attributes.payloadEncoding is base64. Inspect attributes.contentType to determine how to interpret it."
     },
     "attributes": {
       "type": "object",
-      "description": "Metadata about the sendRequest operation and the received reply.",
+      "description": "Metadata about the sendRequest operation and the received reply. destination and destinationType are the request's, every other attribute describes the reply.",
       "properties": {
         "destination": {
           "type": "string",
@@ -22,31 +22,89 @@
         },
         "deliveryMode": {
           "type": "string",
-          "description": "The delivery mode used for the request (e.g., DIRECT, PERSISTENT, NON_PERSISTENT)."
+          "description": "The delivery mode of the reply (e.g., DIRECT, PERSISTENT, NON_PERSISTENT)."
         },
         "contentType": {
           "type": "string",
-          "description": "The content type of the reply payload (e.g., application/json, application/xml, text/plain)."
+          "description": "The content type the reply was read with. The contentType parameter when it is set, with the charset the reply declares when the parameter names none. Else the content type the responder declared on the reply, with its parameters. Else the default of the message class (text/plain for a TextMessage, application/xml for an XMLContentMessage, application/octet-stream for a BytesMessage, application/json for a MapMessage or StreamMessage)."
+        },
+        "payloadEncoding": {
+          "type": "string",
+          "description": "base64 when the payload is binary and carried as a base64 string. Absent for text."
+        },
+        "messageId": {
+          "type": "string",
+          "description": "The broker-assigned message id."
         },
         "correlationId": {
           "type": "string",
-          "description": "The correlation id of the reply message. Present only when the reply carried a correlation id."
+          "description": "The correlation id of the reply."
         },
         "applicationMessageId": {
           "type": "string",
-          "description": "The application-defined message id of the reply. Present only when set on the reply."
+          "description": "The application-defined message id."
         },
         "applicationMessageType": {
           "type": "string",
-          "description": "The application-defined message type of the reply. Present only when set on the reply."
+          "description": "The application-defined message type."
+        },
+        "senderId": {
+          "type": "string",
+          "description": "The sender id of the reply."
+        },
+        "priority": {
+          "type": "integer",
+          "description": "The reply priority (0-255)."
+        },
+        "redelivered": {
+          "type": "boolean",
+          "description": "Whether the reply was flagged as redelivered by the broker."
+        },
+        "dmqEligible": {
+          "type": "boolean",
+          "description": "Whether the reply is eligible for the Dead Message Queue."
+        },
+        "elidingEligible": {
+          "type": "boolean",
+          "description": "Whether the reply is eligible for eliding."
+        },
+        "expiration": {
+          "type": "integer",
+          "description": "Absolute message expiration time as a UTC epoch in milliseconds. Present only when non-zero."
+        },
+        "timeToLive": {
+          "type": "integer",
+          "description": "Time to live in milliseconds. Present only when non-zero."
+        },
+        "senderTimestamp": {
+          "type": "integer",
+          "description": "Sender-supplied timestamp as a UTC epoch in milliseconds. Present only when set."
         },
         "receiveTimestamp": {
           "type": "integer",
-          "description": "Epoch timestamp in milliseconds when the reply was received. Present only when greater than zero."
+          "description": "Epoch timestamp in milliseconds when the reply was received. Present only when non-zero."
+        },
+        "sequenceNumber": {
+          "type": "integer",
+          "description": "The publisher-assigned sequence number. Present only when set."
+        },
+        "replyToName": {
+          "type": "string",
+          "description": "The reply to destination name, when the reply has one."
+        },
+        "replyToType": {
+          "type": "string",
+          "description": "The reply to destination type (TOPIC or QUEUE), when the reply has one."
         },
         "outcome": {
           "type": "string",
           "description": "UNKNOWN when the deadline, an interrupt or a transport failure cut the request publish off after the send was entered. The request may or may not have reached the broker, so a retry is at least once. Absent otherwise."
+        }
+      },
+      "patternProperties": {
+        "^userProp_": {
+          "type": ["string", "number", "boolean"],
+          "description": "A user property the responder set on the reply, as the attribute userProp_ followed by the property key. A bytes value is base64 text, a nested map is JSON object text and a nested stream is JSON array text."
         }
       },
       "required": [
@@ -55,7 +113,7 @@
         "deliveryMode",
         "contentType"
       ],
-      "additionalProperties": false
+      "additionalProperties": true
     },
     "headers": {
       "type": "object",

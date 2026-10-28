@@ -31,4 +31,5 @@ public final class ConnectionCounters {
     public final LongAdder sessionsRebuilt = new LongAdder();
     public final LongAdder requestsFaulted = new LongAdder();
     public final LongAdder cleanupFailures = new LongAdder();
+    public final LongAdder requestReplyMismatched = new LongAdder();
 }

@@ -71,7 +71,7 @@ public class SolaceCommit extends AbstractConnector {
             TransactionExecutor.CompletionCommand completion = entry.executor.completionCommand(true);
             entry.executor.execute(completion);
             completion.get(TX_COMPLETION_WAIT_MS, TimeUnit.MILLISECONDS);
-            log.info("solace.commit: txId=" + txId + " committed successfully");
+            log.debug("solace.commit: txId=" + txId + " committed successfully");
         } catch (TimeoutException e) {
             fault(FAULT_UNKNOWN, ERROR_CODE_UNKNOWN, "completion of transaction " + txId + " did not finish within "
                     + TX_COMPLETION_WAIT_MS + " ms; it continues on its owner", null, messageContext);

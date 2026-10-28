@@ -22,6 +22,7 @@
     <parameter name="pollTimeout" description="Maximum time to wait for a message in milliseconds (default: 5000). The timeout also covers the wait for the flow's owner thread, which serves the polls of one queue in arrival order. Inside beginTransaction the message is held until commit or rollback."/>
     <parameter name="ackMode" description="AUTO (default) acknowledges the message on the flow's owner thread right after it is handed to this call. CLIENT stashes the message under solace.poll.message for acknowledgeMessage or nackMessage with target=POLL, within the connection's pollAckTimeout."/>
     <parameter name="selector" description="Optional JMS-style selector expression to filter messages (e.g., region = 'EU' AND priority &gt; 5)."/>
+    <parameter name="contentType" description="The content type the polled message is read with, for example application/json. It wins over the type the message declares. Empty uses the declared type, else the default of the message class. The payload is never inspected. A value without a charset takes the charset the message declares, else UTF-8."/>
     <parameter name="responseVariable" description="The name of the variable to which the result JSON is stored."/>
     <parameter name="overwriteBody" description="If true, replace the message body with the polled message's payload."/>
     <sequence>

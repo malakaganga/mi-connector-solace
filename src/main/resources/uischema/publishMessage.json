@@ -175,7 +175,7 @@
             "value": {
               "name": "userProperties",
               "displayName": "User Properties",
-              "description": "Key value pairs for user properties (for content-based routing and filtering)",
+              "description": "User properties as a JSON array of objects, for example [{\"region\":\"US\"},{\"priority\":\"high\"}]. Every key of every object is a property. A string stays a string, an integer becomes a long, a decimal a double and a boolean a boolean. A receiver reads each one as the attribute userProp_ followed by the key, for example ${vars.result.attributes.userProp_region}.",
               "tableKey": "propertyName",
               "tableValue": "propertyValue",
               "elements": [
@@ -186,7 +186,7 @@
                     "displayName": "Name",
                     "inputType": "string",
                     "required": false,
-                    "helpTip": ""
+                    "helpTip": "The property key, sent unchanged. A receiver reads it as the attribute userProp_ followed by this key."
                   }
                 },
                 {
@@ -196,7 +196,7 @@
                     "displayName": "Value",
                     "inputType": "stringOrExpression",
                     "required": false,
-                    "helpTip": ""
+                    "helpTip": "The property value. The table is sent as a JSON array of objects, one key per object. A string stays a string, an integer becomes a long, a decimal a double and a boolean a boolean."
                   }
                 }
               ]

@@ -887,13 +887,7 @@ public final class SolaceLogicalConnection {
         try {
             closer.execute(() -> {
                 try {
-                    Hooks.get().point("closer.beforeClose", closing);
-                    closeQuietly(closing);
-                    if (!closing.isClosed()) {
-                        counters.cleanupFailures.increment();
-                        log.warn("SolaceConnector [" + name + "] a session close could not be confirmed; its "
-                                + "reservation is released");
-                    }
+                    closeAndConfirm(closing);
                 } finally {
                     closed.complete(null);
                 }
@@ -904,6 +898,22 @@ public final class SolaceLogicalConnection {
             closed.complete(null);
         }
         return closed;
+    }
+
+    /**
+     * Closer thread only. The final close of one physical session, for a candidate, a replaced session and an
+     * installed session alike. A close that could not be confirmed is logged and counted once. True when the
+     * session is closed.
+     */
+    boolean closeAndConfirm(JCSMPSession closing) {
+        Hooks.get().point("closer.beforeClose", closing);
+        closeQuietly(closing);
+        if (closing.isClosed()) {
+            return true;
+        }
+        counters.cleanupFailures.increment();
+        log.warn("SolaceConnector [" + name + "] a session close could not be confirmed; its reservation is released");
+        return false;
     }
 
     /** Closer thread only. */

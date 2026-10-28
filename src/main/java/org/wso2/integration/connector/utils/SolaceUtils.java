@@ -18,7 +18,8 @@
 
 package org.wso2.integration.connector.utils;
 
-import com.solacesystems.jcsmp.BytesMessage;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonPrimitive;
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.Destination;
 import com.solacesystems.jcsmp.JCSMPChannelProperties;
@@ -26,23 +27,23 @@ import com.solacesystems.jcsmp.JCSMPProperties;
 import com.solacesystems.jcsmp.Queue;
 import com.solacesystems.jcsmp.SDTException;
 import com.solacesystems.jcsmp.SDTMap;
-import com.solacesystems.jcsmp.TextMessage;
-import com.solacesystems.jcsmp.XMLContentMessage;
+import com.solacesystems.jcsmp.SDTStream;
 
-import org.apache.axiom.om.OMElement;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
-import org.apache.synapse.commons.json.JsonUtil;
-import org.apache.synapse.core.axis2.Axis2MessageContext;
+import org.wso2.integration.connector.SolaceFault;
 import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
 import org.wso2.integration.connector.models.SolaceMessageProperties;
 
-import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_PAYLOAD_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_PAYLOAD_ERROR;
 
 /**
  * Utility class for building JCSMP properties from the Synapse MessageContext.
@@ -50,10 +51,6 @@ import java.util.Map;
 public final class SolaceUtils {
 
     private static final Log log = LogFactory.getLog(SolaceUtils.class);
-
-    public static final String CONTENT_TYPE_JSON = "application/json";
-    public static final String CONTENT_TYPE_XML  = "application/xml";
-    public static final String CONTENT_TYPE_TEXT = "text/plain";
 
     private SolaceUtils() {
         // Prevent instantiation
@@ -63,24 +60,6 @@ public final class SolaceUtils {
     // User-supplied parameters arrive as strings. A malformed value must not crash the whole
     // operation with an uncaught NumberFormatException — instead we log a WARN and fall back
     // to a sensible value (a caller-provided default, or skipping an optional setting).
-
-    /**
-     * Parses a long, returning {@code defaultValue} when {@code value} is empty, and returning
-     * {@code defaultValue} (with a WARN) when {@code value} is not a valid number.
-     */
-    public static long parseLongOrDefault(String value, long defaultValue, String paramName) {
-        Long parsed = tryParseLong(value, paramName);
-        return parsed != null ? parsed : defaultValue;
-    }
-
-    /**
-     * Parses an int, returning {@code defaultValue} when {@code value} is empty, and returning
-     * {@code defaultValue} (with a WARN) when {@code value} is not a valid number.
-     */
-    public static int parseIntOrDefault(String value, int defaultValue, String paramName) {
-        Integer parsed = tryParseInt(value, paramName);
-        return parsed != null ? parsed : defaultValue;
-    }
 
     /**
      * Parses a long, or returns {@code null} (with a WARN on malformed input) so the caller can
@@ -114,167 +93,19 @@ public final class SolaceUtils {
         }
     }
 
-    // ---- Message payload / content-type helpers -----------------------------------------
-    // Shared by the poll, browse, sendRequest, and requestCachedMessages operations so the
-    // JCSMP message-type handling lives in one place.
-
-    /**
-     * Extracts the raw payload bytes from a JCSMP message, handling the Text, XMLContent, and
-     * Bytes message types with a binary-attachment fallback. Never returns null.
-     */
-    public static byte[] extractRawPayload(BytesXMLMessage message) {
-        if (message instanceof TextMessage) {
-            String text = ((TextMessage) message).getText();
-            return text != null ? text.getBytes(StandardCharsets.UTF_8) : new byte[0];
-        } else if (message instanceof XMLContentMessage) {
-            String xml = ((XMLContentMessage) message).getXMLContent();
-            return xml != null ? xml.getBytes(StandardCharsets.UTF_8) : new byte[0];
-        } else if (message instanceof BytesMessage) {
-            byte[] data = ((BytesMessage) message).getData();
-            return data != null ? data : new byte[0];
-        }
-        byte[] data = message.getBytes();
-        return data != null ? data : new byte[0];
-    }
-
-    /**
-     * Infers an HTTP content type for a JCSMP message that carries no explicit HTTP content
-     * type: XML for XMLContent messages, JSON/XML/plain by sniffing Text payloads, and
-     * octet-stream otherwise.
-     */
-    public static String inferContentType(BytesXMLMessage message) {
-        if (message instanceof XMLContentMessage) {
-            return CONTENT_TYPE_XML;
-        }
-        if (message instanceof TextMessage) {
-            String text = ((TextMessage) message).getText();
-            if (text != null) {
-                String trimmed = text.trim();
-                if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-                    return CONTENT_TYPE_JSON;
-                }
-                if (trimmed.startsWith("<")) {
-                    return CONTENT_TYPE_XML;
-                }
-            }
-            return CONTENT_TYPE_TEXT;
-        }
-        return "application/octet-stream";
-    }
-
-    /**
-     * Returns true if the string looks like a JSON object or array, used to decide whether a
-     * payload can be embedded as-is or must be quoted as a JSON string literal.
-     */
-    public static boolean looksLikeJson(String s) {
-        if (s == null || s.isEmpty()) {
-            return false;
-        }
-        String t = s.trim();
-        return t.startsWith("{") || t.startsWith("[");
-    }
-
-    /**
-     * Extracts the outgoing payload as a String and detects its content type in one pass.
-     * Priority:
-     *   1. SOAP body has a real XML first child (not Synapse's JSON-wrapper element)
-     *      → serialize as XML. A {@code <text:message>} wrapper is unwrapped as plain text.
-     *   2. JSON stream on the axis2 context → application/json
-     *   3. Otherwise empty payload, text/plain
-     *
-     * <p>We intentionally check the envelope body before {@link JsonUtil#hasAJsonPayload}:
-     * Synapse's REST API path exposes XML bodies as JSON for path-expression evaluation, which
-     * flips {@code hasAJsonPayload} to {@code true} and would otherwise misclassify XML as JSON.
-     *
-     * @return a two-element array: [0]=payload string, [1]=detected content type
-     */
-    public static String[] extractPayloadAndContentType(MessageContext messageContext) {
-        org.apache.axis2.context.MessageContext axis2Mc =
-                ((Axis2MessageContext) messageContext).getAxis2MessageContext();
-
-        OMElement first = messageContext.getEnvelope().getBody().getFirstElement();
-        boolean hasJson = JsonUtil.hasAJsonPayload(axis2Mc);
-
-        if (log.isDebugEnabled()) {
-            log.debug("extractPayloadAndContentType: firstElement="
-                    + (first == null ? "null" : first.getLocalName())
-                    + ", hasAJsonPayload=" + hasJson);
-        }
-
-        // 1. Real XML / text-wrapper element wins (but skip JSON wrapper synthesized by Synapse)
-        if (first != null && !isJsonWrapperElement(first)) {
-            if ("message".equals(first.getLocalName())
-                    && first.getNamespace() != null
-                    && "http://ws.apache.org/commons/ns/payload".equals(
-                            first.getNamespace().getNamespaceURI())) {
-                String text = first.getText();
-                return new String[] { text != null ? text : "", CONTENT_TYPE_TEXT };
-            }
-            return new String[] { first.toString(), CONTENT_TYPE_XML };
-        }
-
-        // 2. JSON stream
-        if (hasJson) {
-            String json = JsonUtil.jsonPayloadToString(axis2Mc);
-            if (log.isDebugEnabled()) {
-                log.debug("jsonPayloadToString returned: "
-                        + (json == null ? "null" : "len=" + json.length() + " value=" + json));
-            }
-            if (json != null && !json.isEmpty()) {
-                return new String[] { json, CONTENT_TYPE_JSON };
-            }
-            // Fallback: serialize the JSON OMElement wrapper back to JSON via formatter.
-            if (first != null && isJsonWrapperElement(first)) {
-                String fallback = jsonElementToString(first);
-                if (log.isDebugEnabled()) {
-                    log.debug("jsonElementToString fallback returned: "
-                            + (fallback == null ? "null" : "len=" + fallback.length()
-                                    + " value=" + fallback));
-                }
-                if (fallback != null && !fallback.isEmpty()) {
-                    return new String[] { fallback, CONTENT_TYPE_JSON };
-                }
-            }
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("extractPayloadAndContentType: returning EMPTY payload as text/plain");
-        }
-        return new String[] { "", CONTENT_TYPE_TEXT };
-    }
-
-    /**
-     * Serializes a Synapse JSON-wrapper OMElement ({@code <jsonObject>}/{@code <jsonArray>})
-     * back to its JSON string form. Used as a fallback when the axis2 JSON input stream
-     * has been consumed and {@link JsonUtil#jsonPayloadToString} returns empty.
-     */
-    private static String jsonElementToString(OMElement jsonElement) {
-        try {
-            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-            JsonUtil.writeAsJson(jsonElement, out);
-            return new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            if (log.isDebugEnabled()) {
-                log.debug("Failed to serialize JSON-wrapper element", e);
-            }
-            return null;
-        }
-    }
-
-    private static boolean isJsonWrapperElement(OMElement element) {
-        String local = element.getLocalName();
-        return "jsonObject".equals(local) || "jsonArray".equals(local);
-    }
-
     /**
      * Builds a {@link SolaceMessageProperties} from optional template parameters in the message context.
      * Returns {@code null} if no message properties were supplied — allowing callers to skip
      * applying properties entirely.
      *
      * @param messageContext the Synapse message context
+     * @param operation      the operation name, for the fault message
      * @return populated SolaceMessageProperties, or {@code null} if none of the fields are set
+     * @throws SolaceFault PAYLOAD_ERROR when the userProperties input is not the documented JSON array, and
+     *                     INVALID_CONFIG for a bad number, boolean or reply to type
      */
-    public static SolaceMessageProperties buildMessageProperties(MessageContext messageContext) {
+    public static SolaceMessageProperties buildMessageProperties(MessageContext messageContext, String operation)
+            throws SolaceFault {
         SolaceMessageProperties properties = new SolaceMessageProperties();
         boolean hasProperties = false;
 
@@ -285,19 +116,20 @@ public final class SolaceUtils {
             hasProperties = true;
         }
 
+        // The numbers and the booleans use the strict parse of the operation parameters. An absent value sets
+        // nothing, a bad value faults INVALID_CONFIG before any message is built.
         String priority = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.PRIORITY);
-        Integer priorityValue = tryParseInt(priority, SolaceConstants.PRIORITY);
-        if (priorityValue != null) {
-            properties.setPriority(priorityValue);
+        if (StringUtils.isNotBlank(priority)) {
+            properties.setPriority(OperationParameters.parseInt(SolaceConstants.PRIORITY, priority, 0, 0, 255));
             hasProperties = true;
         }
 
         String timeToLive = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.TIME_TO_LIVE);
-        Long timeToLiveValue = tryParseLong(timeToLive, SolaceConstants.TIME_TO_LIVE);
-        if (timeToLiveValue != null) {
-            properties.setTimeToLive(timeToLiveValue);
+        if (StringUtils.isNotBlank(timeToLive)) {
+            properties.setTimeToLive(OperationParameters.parseLong(SolaceConstants.TIME_TO_LIVE, timeToLive, 0L, 0L,
+                    Long.MAX_VALUE));
             hasProperties = true;
         }
 
@@ -326,8 +158,12 @@ public final class SolaceUtils {
                 SolaceConstants.REPLY_TO_DESTINATION_TYPE);
         String replyToDestinationName = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.REPLY_TO_DESTINATION_NAME);
-        if (StringUtils.isNotEmpty(replyToDestinationType) && StringUtils.isNotEmpty(replyToDestinationName)) {
-            properties.setReplyToDestinationType(replyToDestinationType);
+        if (StringUtils.isNotEmpty(replyToDestinationName)) {
+            // An absent reply to type means TOPIC, as for the destination type.
+            properties.setReplyToDestinationType(OperationParameters.parseChoice(
+                    SolaceConstants.REPLY_TO_DESTINATION_TYPE, replyToDestinationType,
+                    SolaceConstants.DESTINATION_TYPE_TOPIC, SolaceConstants.DESTINATION_TYPE_TOPIC,
+                    SolaceConstants.DESTINATION_TYPE_QUEUE));
             properties.setReplyToDestinationName(replyToDestinationName);
             hasProperties = true;
         }
@@ -335,43 +171,30 @@ public final class SolaceUtils {
         String userPropertiesJson = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.USER_PROPERTIES);
         if (StringUtils.isNotEmpty(userPropertiesJson)) {
-            try {
-            org.json.JSONArray jsonArray = new org.json.JSONArray(userPropertiesJson);
-            Map<String, String> userPropsMap = new HashMap<>();
-            for (int i = 0; i < jsonArray.length(); i++) {
-                org.json.JSONObject obj = jsonArray.getJSONObject(i);
-                String key = obj.keys().next();
-                String value = obj.getString(key);
-                userPropsMap.put(key, value);
-            }
-            properties.setUserProperties(userPropsMap);
+            properties.setUserProperties(parseUserProperties(userPropertiesJson, operation));
             hasProperties = true;
-            } catch (Exception e) {
-            if (log.isDebugEnabled()) {
-                log.debug("Failed to parse user properties JSON array: " + userPropertiesJson, e);
-            }
-            }
         }
 
         String dmqEligible = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.DMQ_ELIGIBLE);
-        if (StringUtils.isNotEmpty(dmqEligible)) {
-            properties.setDmqEligible(Boolean.parseBoolean(dmqEligible));
+        if (StringUtils.isNotBlank(dmqEligible)) {
+            properties.setDmqEligible(OperationParameters.parseFlag(SolaceConstants.DMQ_ELIGIBLE, dmqEligible, false));
             hasProperties = true;
         }
 
         String elidingEligible = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.ELIDING_ELIGIBLE);
-        if (StringUtils.isNotEmpty(elidingEligible)) {
-            properties.setElidingEligible(Boolean.parseBoolean(elidingEligible));
+        if (StringUtils.isNotBlank(elidingEligible)) {
+            properties.setElidingEligible(OperationParameters.parseFlag(SolaceConstants.ELIDING_ELIGIBLE,
+                    elidingEligible, false));
             hasProperties = true;
         }
 
         String expiration = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
                 SolaceConstants.EXPIRATION);
-        Long expirationValue = tryParseLong(expiration, SolaceConstants.EXPIRATION);
-        if (expirationValue != null) {
-            properties.setExpiration(expirationValue);
+        if (StringUtils.isNotBlank(expiration)) {
+            properties.setExpiration(OperationParameters.parseLong(SolaceConstants.EXPIRATION, expiration, 0L, 0L,
+                    Long.MAX_VALUE));
             hasProperties = true;
         }
 
@@ -379,12 +202,69 @@ public final class SolaceUtils {
     }
 
     /**
-     * Populates {@code sink} with the standard SMF headers from a received message
-     * (poll/browse/sendRequest reply/inbound). Null/zero/default fields are skipped so
-     * the response variable stays uncluttered. User properties (the SDTMap set by the
-     * publisher via {@code <userProperties>}) are placed under the {@code userProperties}
-     * key as a nested map. Pre-existing keys in {@code sink} (e.g. a destination name
-     * the caller already filled in) are not overwritten.
+     * Parses the userProperties input: a JSON array of objects, every key of every object is a property, so the
+     * one key per object form keeps working. A string is a string property, an integer a long, a decimal a double
+     * and a boolean a boolean. A null, a nested object or array, invalid JSON or an input that is not an array
+     * faults PAYLOAD_ERROR, before any broker call. The keys keep their order.
+     */
+    public static Map<String, Object> parseUserProperties(String json, String operation) throws SolaceFault {
+        JsonElement parsed = PayloadCodec.parseJson(json);
+        if (parsed == null) {
+            throw payloadFault(operation, "userProperties is not valid JSON: " + json);
+        }
+        if (!parsed.isJsonArray()) {
+            throw payloadFault(operation, "userProperties must be a JSON array of objects, got " + json);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (JsonElement item : parsed.getAsJsonArray()) {
+            if (!item.isJsonObject()) {
+                throw payloadFault(operation, "every element of userProperties must be a JSON object, got " + item);
+            }
+            for (Map.Entry<String, JsonElement> entry : item.getAsJsonObject().entrySet()) {
+                out.put(entry.getKey(), userPropertyValue(entry.getKey(), entry.getValue(), operation));
+            }
+        }
+        return out;
+    }
+
+    private static Object userPropertyValue(String key, JsonElement value, String operation) throws SolaceFault {
+        if (!value.isJsonPrimitive()) {
+            throw payloadFault(operation, "user property '" + key + "' must be a string, a number or a boolean, got "
+                    + value);
+        }
+        JsonPrimitive primitive = value.getAsJsonPrimitive();
+        if (primitive.isBoolean()) {
+            return primitive.getAsBoolean();
+        }
+        if (primitive.isNumber()) {
+            String literal = primitive.getAsString();
+            if (literal.matches("-?\\d+")) {
+                try {
+                    return Long.parseLong(literal);
+                } catch (NumberFormatException e) {
+                    throw payloadFault(operation, "user property '" + key + "' is outside the long range: " + literal);
+                }
+            }
+            double decimal = primitive.getAsDouble();
+            if (Double.isInfinite(decimal) || Double.isNaN(decimal)) {
+                throw payloadFault(operation, "user property '" + key + "' is outside the double range: " + literal);
+            }
+            return decimal;
+        }
+        return primitive.getAsString();
+    }
+
+    private static SolaceFault payloadFault(String operation, String reason) {
+        return new SolaceFault(FAULT_PAYLOAD_ERROR, ERROR_CODE_PAYLOAD_ERROR, operation + ": " + reason);
+    }
+
+    /**
+     * Populates {@code sink} with the standard SMF headers of a received message, for poll, sendRequest and the
+     * browse items. Every value is a string, a number or a boolean. Null, zero and default fields are skipped so
+     * the response variable stays uncluttered. The reply to destination becomes {@code replyToName} and
+     * {@code replyToType}. Every user property becomes its own attribute named {@code userProp_} followed by
+     * the key, the key unchanged, so {@code ${vars.X.attributes.userProp_key}} reads it. A key in {@code sink}
+     * that the caller already filled in, for example the destination, is not overwritten.
      */
     public static void populateMessageMetadata(BytesXMLMessage message, Map<String, Object> sink) {
         if (message == null || sink == null) {
@@ -425,28 +305,30 @@ public final class SolaceUtils {
         }
 
         Destination replyTo = message.getReplyTo();
-        if (replyTo != null && !sink.containsKey("replyTo")) {
-            Map<String, Object> replyToMap = new HashMap<>();
-            replyToMap.put("name", replyTo.getName());
-            replyToMap.put("type", replyTo instanceof Queue
+        if (replyTo != null) {
+            putIfAbsentNotNull(sink, "replyToName", replyTo.getName());
+            sink.putIfAbsent("replyToType", replyTo instanceof Queue
                     ? SolaceConstants.DESTINATION_TYPE_QUEUE
                     : SolaceConstants.DESTINATION_TYPE_TOPIC);
-            sink.put("replyTo", replyToMap);
         }
 
         Map<String, Object> userProps = extractUserProperties(message);
-        if (userProps != null && !userProps.isEmpty() && !sink.containsKey("userProperties")) {
-            sink.put("userProperties", userProps);
+        if (userProps != null) {
+            for (Map.Entry<String, Object> entry : userProps.entrySet()) {
+                sink.put(SolaceConstants.USER_PROPERTY_PREFIX + entry.getKey(), entry.getValue());
+            }
         }
     }
 
     /**
-     * Reads the SDTMap of user properties (publisher-supplied {@code <userProperties>})
-     * off a received message and converts it to a plain {@code Map<String, Object>} so
-     * Synapse expressions can drill into it via {@code ${vars.X.attributes.userProperties.key}}.
-     * Returns {@code null} if the message carries no user properties; primitive SDT values
-     * (string/int/long/double/bool/byte[]) round-trip naturally; nested SDT containers fall
-     * back to {@code toString()} so the field is at least readable.
+     * Reads the SDTMap of user properties, the ones a publisher supplied through {@code <userProperties>}, off a
+     * received message and converts it to a plain {@code Map<String, Object>} keyed by the property name. The
+     * metadata helper puts every entry on the attributes as {@code userProp_} followed by the key, so a Synapse
+     * expression reads it as {@code ${vars.X.attributes.userProp_key}}, or with the bracket form
+     * {@code ${vars.X.attributes['userProp_a.b']}} for a key with punctuation. A string, a number and a boolean
+     * stay as they are. A bytes value, the JCSMP ByteArray that the client returns or a byte array, becomes base64
+     * text. A nested SDTMap becomes JSON object text and a nested SDTStream JSON array text. A null is skipped.
+     * Returns {@code null} if the message carries no user properties.
      */
     public static Map<String, Object> extractUserProperties(BytesXMLMessage message) {
         if (message == null) {
@@ -460,15 +342,17 @@ public final class SolaceUtils {
         for (String key : props.keySet()) {
             try {
                 Object value = props.get(key);
-                if (value == null
-                        || value instanceof String
-                        || value instanceof Number
-                        || value instanceof Boolean) {
+                if (value == null) {
+                    continue;
+                }
+                if (value instanceof String || value instanceof Number || value instanceof Boolean) {
                     out.put(key, value);
-                } else if (value instanceof byte[]) {
-                    out.put(key, java.util.Base64.getEncoder().encodeToString((byte[]) value));
+                } else if (value instanceof SDTMap) {
+                    out.put(key, PayloadCodec.sdtMapToJson((SDTMap) value).toString());
+                } else if (value instanceof SDTStream) {
+                    out.put(key, PayloadCodec.sdtStreamToJson((SDTStream) value).toString());
                 } else {
-                    out.put(key, value.toString());
+                    out.put(key, PayloadCodec.sdtScalarToText(value));
                 }
             } catch (SDTException e) {
                 if (log.isDebugEnabled()) {

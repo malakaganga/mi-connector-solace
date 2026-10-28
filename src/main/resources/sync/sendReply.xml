@@ -27,7 +27,7 @@
     <parameter name="applicationMessageId" description="Application-defined message ID for the reply. If omitted, the application message ID from the inbound request is echoed."/>
     <parameter name="applicationMessageType" description="Application-defined message type."/>
     <parameter name="senderId" description="Sender ID for the reply message."/>
-    <parameter name="userProperties" description="Custom user properties as JSON object (e.g., {&quot;region&quot;:&quot;US&quot;})."/>
+    <parameter name="userProperties" description="Custom user properties as a JSON array of objects, for example [{&quot;region&quot;:&quot;US&quot;},{&quot;priority&quot;:&quot;high&quot;}]. A string stays a string, an integer becomes a long, a decimal a double and a boolean a boolean. A receiver reads each one as the attribute userProp_ followed by the key."/>
     <parameter name="dmqEligible" description="Whether the message is eligible for the Dead Message Queue (true/false)."/>
     <parameter name="elidingEligible" description="Whether the message is eligible for eliding (true/false)."/>
     <parameter name="expiration" description="Absolute message expiration time as a UTC epoch in milliseconds (0 means no expiration)."/>

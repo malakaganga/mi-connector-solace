@@ -6,7 +6,7 @@
   "properties": {
     "payload": {
       "type": ["object", "array", "string", "number", "boolean", "null"],
-      "description": "On a successful poll, the polled message content (JSON replies are parsed into an object or array; non-JSON content is surfaced as a string). On timeout, a JSON envelope of the form {\"received\": false, \"timedOut\": true, \"destination\": \"<queue>\"}. Inspect attributes.received / attributes.timedOut before dereferencing.",
+      "description": "On a successful poll, the polled message content. A body declared application/json or a +json type is the parsed JSON value, any JSON value. Any other text is a string, a TextMessage without a declared type included, whatever its body. A MapMessage or StreamMessage is a JSON object or array. Binary is a base64 string and attributes.payloadEncoding is base64. On timeout, a JSON envelope of the form {\"received\": false, \"timedOut\": true, \"destination\": \"<queue>\"}. Inspect attributes.received / attributes.timedOut before dereferencing.",
       "additionalProperties": true
     },
     "attributes": {
@@ -35,7 +35,11 @@
         },
         "contentType": {
           "type": "string",
-          "description": "The content type of the polled message payload (e.g., application/json, application/xml, text/plain). Present only when a message was received."
+          "description": "The content type the message was read with. The contentType parameter when it is set, with the charset the message declares when the parameter names none. Else the content type the publisher declared on the message, with its parameters. Else the default of the message class (text/plain for a TextMessage, application/xml for an XMLContentMessage, application/octet-stream for a BytesMessage, application/json for a MapMessage or StreamMessage). Present only when a message was received."
+        },
+        "payloadEncoding": {
+          "type": "string",
+          "description": "base64 when the payload is binary and carried as a base64 string. Absent for text."
         },
         "messageId": {
           "type": "string",
@@ -97,25 +101,19 @@
           "type": "integer",
           "description": "The publisher-assigned sequence number. Present only when set."
         },
-        "replyTo": {
-          "type": "object",
-          "description": "The reply-to destination of the message, when present.",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "The reply-to destination name."
-            },
-            "type": {
-              "type": "string",
-              "description": "The reply-to destination type (TOPIC or QUEUE)."
-            }
-          },
-          "additionalProperties": false
+        "replyToName": {
+          "type": "string",
+          "description": "The reply to destination name, when the message has one."
         },
-        "userProperties": {
-          "type": "object",
-          "description": "Publisher-supplied user properties carried on the message, for content-based routing and filtering.",
-          "additionalProperties": true
+        "replyToType": {
+          "type": "string",
+          "description": "The reply to destination type (TOPIC or QUEUE), when the message has one."
+        }
+      },
+      "patternProperties": {
+        "^userProp_": {
+          "type": ["string", "number", "boolean"],
+          "description": "A user property the publisher set, as the attribute userProp_ followed by the property key. A bytes value is base64 text, a nested map is JSON object text and a nested stream is JSON array text."
         }
       },
       "required": [

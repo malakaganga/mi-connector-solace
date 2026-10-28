@@ -17,6 +17,8 @@
  */
 package org.wso2.integration.connector.connection;
 
+import org.wso2.integration.connector.hooks.Hooks;
+
 import java.util.concurrent.Callable;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.FutureTask;
@@ -38,15 +40,26 @@ public final class TransactionCommand<T> extends FutureTask<T> implements Delaye
     volatile boolean cancelledByCaller;
     // The owner's cancellation reason, stored through accept(String) before the owner's cancel.
     volatile String ownerReason;
+    // The hook point a test build can hold this command at, right after its execution claim. Null for no hook.
+    private final String claimHook;
 
     public TransactionCommand(Callable<T> body, long ackTimeoutMillis) {
+        this(body, ackTimeoutMillis, null);
+    }
+
+    /** The absolute deadline is computed with checked arithmetic, so a huge budget fails here and not in the owner. */
+    public TransactionCommand(Callable<T> body, long ackTimeoutMillis, String claimHook) {
         super(body);
-        this.deadline = System.currentTimeMillis() + ackTimeoutMillis;
+        this.deadline = Math.addExact(System.currentTimeMillis(), ackTimeoutMillis);
+        this.claimHook = claimHook;
     }
 
     @Override
     public void run() {
         started = true;
+        if (claimHook != null) {
+            Hooks.get().point(claimHook, this);
+        }
         super.run();
     }
 

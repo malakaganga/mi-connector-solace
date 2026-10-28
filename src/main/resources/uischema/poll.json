@@ -79,6 +79,17 @@
           {
             "type": "attribute",
             "value": {
+              "name": "contentType",
+              "displayName": "Content Type",
+              "inputType": "stringOrExpression",
+              "defaultValue": "",
+              "required": "false",
+              "helpTip": "The content type the polled message is read with, for example application/json. It wins over the type the message declares. Empty uses the declared type, else the default of the message class. The payload is never inspected. A value without a charset takes the charset the message declares, else UTF-8."
+            }
+          },
+          {
+            "type": "attribute",
+            "value": {
               "name": "responseVariable",
               "displayName": "Response Variable",
               "inputType": "stringOrExpression",

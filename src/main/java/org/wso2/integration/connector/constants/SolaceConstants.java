@@ -195,15 +195,17 @@ public final class SolaceConstants {
     // Poll (synchronous receive from queue) parameters
     public static final String QUEUE_NAME = "queueName";
     public static final String POLL_TIMEOUT = "pollTimeout";
-    public static final long DEFAULT_POLL_TIMEOUT_MS = 5000L;
+    public static final int DEFAULT_POLL_TIMEOUT_MS = 5000;
     public static final int ERROR_CODE_POLL_ERROR = 700108;
 
     // Browse queue parameters
     public static final String MAX_MESSAGES = "maxMessages";
     public static final String BROWSE_TIMEOUT = "browseTimeout";
     public static final String SELECTOR = "selector";
+    // The reader override of poll, sendRequest and browse: the content type a received message is read with.
+    public static final String CONTENT_TYPE = "contentType";
     public static final int DEFAULT_BROWSE_MAX_MESSAGES = 10;
-    public static final long DEFAULT_BROWSE_TIMEOUT_MS = 2000L;
+    public static final int DEFAULT_BROWSE_TIMEOUT_MS = 2000;
     public static final int ERROR_CODE_BROWSE_ERROR = 700109;
 
     // Solace Cache request parameters
@@ -216,7 +218,7 @@ public final class SolaceConstants {
     public static final String CACHE_LIVE_DATA_FULFILL = "FULFILL";
     public static final String CACHE_LIVE_DATA_FLOW_THRU = "FLOW_THRU";
     public static final String CACHE_LIVE_DATA_QUEUE = "QUEUE";
-    public static final long DEFAULT_CACHE_REQUEST_TIMEOUT_MS = 10000L;
+    public static final int DEFAULT_CACHE_REQUEST_TIMEOUT_MS = 10000;
     public static final int DEFAULT_CACHE_MAX_MESSAGES = 0; // 0 = unlimited per Solace API
     public static final int ERROR_CODE_CACHE_ERROR = 700110;
 
@@ -268,6 +270,8 @@ public final class SolaceConstants {
     public static final long OWNER_CALL_TIMEOUT_MS = 7000L;
     // Bound of a commit or rollback command wait.
     public static final long TX_COMPLETION_WAIT_MS = 30000L;
+    // The owner's allowance on top of a transacted poll's timeout: the command budget is the timeout plus this.
+    public static final long TX_POLL_OWNER_ALLOWANCE_MS = 2000L;
     // Applied when the init template gives no maxWaitTime.
     public static final String DEFAULT_POOL_MAX_WAIT_MS = "10000";
     // The commons-pool default of maxActiveConnections, and the exhausted action that lets the pool grow past it.
@@ -296,6 +300,11 @@ public final class SolaceConstants {
     public static final String FAULT_NACK = "NACK";
     public static final String FAULT_ROLLED_BACK = "ROLLED_BACK";
 
+    // 2.0.1 fault names
+    public static final String FAULT_PAYLOAD_ERROR = "PAYLOAD_ERROR";
+    public static final String FAULT_TRANSACTION_CONNECTION_MISMATCH = "TRANSACTION_CONNECTION_MISMATCH";
+    public static final String FAULT_TRANSACTION_MESSAGE_LIMIT = "TRANSACTION_MESSAGE_LIMIT";
+
     // 2.0.0 error codes
     public static final int ERROR_CODE_TRANSACTION_ACTIVE = 700111;
     public static final int ERROR_CODE_TRANSACTION_COMPLETED = 700112;
@@ -310,4 +319,16 @@ public final class SolaceConstants {
     public static final int ERROR_CODE_UNKNOWN = 700121;
     public static final int ERROR_CODE_NACK = 700122;
     public static final int ERROR_CODE_ROLLED_BACK = 700123;
+
+    // 2.0.1 error codes
+    public static final int ERROR_CODE_PAYLOAD_ERROR = 700124;
+    public static final int ERROR_CODE_TRANSACTION_CONNECTION_MISMATCH = 700125;
+    public static final int ERROR_CODE_TRANSACTION_MESSAGE_LIMIT = 700126;
+
+    // 2.0.1 result keys of the payload contract
+    public static final String RESULT_CONTENT_TYPE = "contentType";
+    public static final String RESULT_PAYLOAD_ENCODING = "payloadEncoding";
+    public static final String PAYLOAD_ENCODING_BASE64 = "base64";
+    // A received user property is the attribute named with this prefix followed by the key, the key unchanged.
+    public static final String USER_PROPERTY_PREFIX = "userProp_";
 }

@@ -29,12 +29,13 @@
     <parameter name="applicationMessageId" description="Application-defined message ID."/>
     <parameter name="applicationMessageType" description="Application-defined message type."/>
     <parameter name="senderId" description="Sender ID for the request message."/>
-    <parameter name="userProperties" description="Custom user properties as JSON object (e.g., {&quot;region&quot;:&quot;US&quot;})."/>
+    <parameter name="userProperties" description="Custom user properties as a JSON array of objects, for example [{&quot;region&quot;:&quot;US&quot;},{&quot;priority&quot;:&quot;high&quot;}]. A string stays a string, an integer becomes a long, a decimal a double and a boolean a boolean. A receiver reads each one as the attribute userProp_ followed by the key."/>
     <parameter name="dmqEligible" description="Whether the message is eligible for the Dead Message Queue (true/false)."/>
     <parameter name="elidingEligible" description="Whether the message is eligible for eliding (true/false)."/>
     <parameter name="expiration" description="Absolute message expiration time as a UTC epoch in milliseconds (0 means no expiration)."/>
     <parameter name="waitForAck" description="Whether to wait for the broker acknowledgement of a PERSISTENT or NON_PERSISTENT request before waiting for the reply. Default: true for PERSISTENT and NON_PERSISTENT. Ignored for DIRECT."/>
     <parameter name="ackTimeout" description="Deadline in milliseconds for the send and the broker acknowledgement of the request. Default: 10000. The requestTimeout bounds the whole operation."/>
+    <parameter name="contentType" description="The content type the reply is read with, for example application/json. It applies to the reply only, the request keeps the content type of the message context. It wins over the type the reply declares. Empty uses the declared type, else the default of its message class. The payload is never inspected. A value without a charset takes the charset the reply declares, else UTF-8."/>
     <parameter name="responseVariable" description="The name of the variable to which the output should be stored."/>
     <parameter name="overwriteBody" description="Replace the Message Body in Message Context with the response."/>
     <sequence>

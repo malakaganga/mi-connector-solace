@@ -33,9 +33,9 @@ import org.wso2.integration.connector.constants.SolaceConstants;
 import org.wso2.integration.connector.core.AbstractConnectorOperation;
 import org.wso2.integration.connector.core.connection.ConnectionHandler;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
-import org.wso2.integration.connector.utils.SolaceUtils;
+import org.wso2.integration.connector.utils.OperationParameters;
+import org.wso2.integration.connector.utils.PayloadCodec;
 
-import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,10 +79,16 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
         ConnectionHandler handler = ConnectionHandler.getConnectionHandler();
         SolaceConnection connection = null;
         try {
-            String requestTimeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.CACHE_REQUEST_TIMEOUT);
-            long requestTimeout = SolaceUtils.parseLongOrDefault(requestTimeoutStr,
-                    SolaceConstants.DEFAULT_CACHE_REQUEST_TIMEOUT_MS, SolaceConstants.CACHE_REQUEST_TIMEOUT);
+            // Every number is parsed before the borrow, so a bad value never reaches the broker.
+            int requestTimeout = OperationParameters.intValue(messageContext, SolaceConstants.CACHE_REQUEST_TIMEOUT,
+                    SolaceConstants.DEFAULT_CACHE_REQUEST_TIMEOUT_MS, 1, Integer.MAX_VALUE);
+            int maxMessages = OperationParameters.intValue(messageContext, SolaceConstants.CACHE_MAX_MESSAGES,
+                    SolaceConstants.DEFAULT_CACHE_MAX_MESSAGES, 1, Integer.MAX_VALUE);
+            int maxAge = OperationParameters.intValue(messageContext, SolaceConstants.CACHE_MAX_AGE_SECONDS, 0, 0,
+                    Integer.MAX_VALUE);
+            String liveDataAction = OperationParameters.choice(messageContext, SolaceConstants.CACHE_LIVE_DATA_ACTION,
+                    SolaceConstants.CACHE_LIVE_DATA_FULFILL, SolaceConstants.CACHE_LIVE_DATA_FULFILL,
+                    SolaceConstants.CACHE_LIVE_DATA_FLOW_THRU, SolaceConstants.CACHE_LIVE_DATA_QUEUE);
 
             connection = (SolaceConnection) handler.getConnection(SolaceConstants.CONNECTOR_NAME, connectionName);
             // The first call after the borrow: connects the holder on first use, or rebuilds it.
@@ -108,21 +114,6 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
                         + " instance must have been configured to cache messages on this topic.",
                         messageContext);
                 return;
-            }
-
-            String maxMessagesStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.CACHE_MAX_MESSAGES);
-            long maxMessages = SolaceUtils.parseLongOrDefault(maxMessagesStr,
-                    SolaceConstants.DEFAULT_CACHE_MAX_MESSAGES, SolaceConstants.CACHE_MAX_MESSAGES);
-
-            String maxAgeStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.CACHE_MAX_AGE_SECONDS);
-            int maxAge = SolaceUtils.parseIntOrDefault(maxAgeStr, 0, SolaceConstants.CACHE_MAX_AGE_SECONDS);
-
-            String liveDataAction = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.CACHE_LIVE_DATA_ACTION);
-            if (StringUtils.isEmpty(liveDataAction)) {
-                liveDataAction = SolaceConstants.CACHE_LIVE_DATA_FULFILL;
             }
 
             // Drain window mirrors the request timeout — cached messages arrive during/after
@@ -180,7 +171,7 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
         }
     }
 
-    private JSONObject toSummary(BytesXMLMessage message) {
+    private JSONObject toSummary(BytesXMLMessage message) throws SolaceFault {
         JSONObject summary = new JSONObject();
         if (message.getMessageId() != null) {
             summary.put("messageId", message.getMessageId());
@@ -199,13 +190,13 @@ public class SolaceRequestCachedMessages extends AbstractConnectorOperation {
         }
         summary.put("cacheRequest", message.isCacheMessage());
 
-        byte[] bytes = SolaceUtils.extractRawPayload(message);
-        summary.put("payload", new String(bytes, StandardCharsets.UTF_8));
-        String contentType = message.getHTTPContentType();
-        if (StringUtils.isEmpty(contentType)) {
-            contentType = SolaceUtils.inferContentType(message);
+        // The body as the payload codec reads it: text as it is, binary as base64 text with payloadEncoding.
+        PayloadCodec.Received received = PayloadCodec.decode(message, "requestCachedMessages");
+        summary.put("payload", received.summaryText());
+        summary.put(SolaceConstants.RESULT_CONTENT_TYPE, received.contentType);
+        if (received.isBinary()) {
+            summary.put(SolaceConstants.RESULT_PAYLOAD_ENCODING, SolaceConstants.PAYLOAD_ENCODING_BASE64);
         }
-        summary.put("contentType", contentType);
         return summary;
     }
 }

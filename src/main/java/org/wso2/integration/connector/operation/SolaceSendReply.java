@@ -21,7 +21,6 @@ package org.wso2.integration.connector.operation;
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.XMLMessageProducer;
-import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
@@ -42,6 +41,8 @@ import org.wso2.integration.connector.core.AbstractConnectorOperation;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
 import org.wso2.integration.connector.models.PublishResult;
 import org.wso2.integration.connector.models.SolaceMessageProperties;
+import org.wso2.integration.connector.utils.OperationParameters;
+import org.wso2.integration.connector.utils.PayloadCodec;
 import org.wso2.integration.connector.utils.SolaceUtils;
 
 import java.util.HashMap;
@@ -52,10 +53,12 @@ import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_COD
 import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_NACK;
 import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_POLL_ERROR;
 import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_PUBLISH_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_TRANSACTION_CONNECTION_MISMATCH;
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_CONNECTION_ERROR;
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_NACK;
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_POLL_ERROR;
 import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_PUBLISH_ERROR;
+import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_TRANSACTION_CONNECTION_MISMATCH;
 
 /**
  * Sends a reply to an inbound request message using JCSMP's native sendReply API.
@@ -90,14 +93,18 @@ public class SolaceSendReply extends AbstractConnectorOperation {
 
         PublishOperation op = null;
         try {
-            // target selects the request message: INBOUND, the default, is the raw message the inbound
-            // endpoint stashed, POLL is the message of the lease a poll with ackMode=CLIENT stashed.
-            String target = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.TARGET);
-            if (StringUtils.isEmpty(target)) {
-                target = SolaceConstants.TARGET_INBOUND;
-            }
+            // Every parameter is parsed before the request message is read, so a bad value settles nothing and
+            // sends nothing. target selects the request message: INBOUND, the default, is the raw message the
+            // inbound endpoint stashed, POLL is the message of the lease a poll with ackMode=CLIENT stashed.
+            String target = OperationParameters.target(messageContext);
+            String deliveryMode = OperationParameters.deliveryMode(messageContext);
+            String messageType = OperationParameters.messageType(messageContext);
+            // The publish acknowledgement of a guaranteed reply, read as publishMessage reads them.
+            boolean waitForAck = OperationParameters.flag(messageContext, SolaceConstants.WAIT_FOR_ACK, true);
+            long ackTimeout = OperationParameters.ackTimeout(messageContext);
+            OperationParameters.checkMessageProperties(messageContext);
             BytesXMLMessage inboundMessage;
-            if (SolaceConstants.TARGET_POLL.equalsIgnoreCase(target)) {
+            if (SolaceConstants.TARGET_POLL.equals(target)) {
                 Object stashed = messageContext.getProperty(SolaceConstants.SOLACE_POLL_MESSAGE);
                 if (!(stashed instanceof PollLease)) {
                     throw new SolaceFault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,
@@ -123,12 +130,6 @@ public class SolaceSendReply extends AbstractConnectorOperation {
                 return;
             }
 
-            String deliveryMode = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.DELIVERY_MODE);
-            if (StringUtils.isEmpty(deliveryMode)) {
-                deliveryMode = SolaceConstants.DELIVERY_MODE_DIRECT;
-            }
-
             // Transacted sessions only carry guaranteed messages — DIRECT bypasses the spool
             // and has no rollback semantics, so the JCSMP transacted producer rejects it.
             if (transacted && SolaceConstants.DELIVERY_MODE_DIRECT.equalsIgnoreCase(deliveryMode)) {
@@ -140,42 +141,14 @@ public class SolaceSendReply extends AbstractConnectorOperation {
                 return;
             }
 
-            String messageType = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.MESSAGE_TYPE);
-            if (StringUtils.isEmpty(messageType)) {
-                messageType = SolaceConstants.MESSAGE_TYPE_TEXT;
-            }
-            messageType = messageType.toUpperCase();
-            // Solace has no JSON message type — JSON payloads are carried as TEXT on the wire.
-            if (!SolaceConstants.MESSAGE_TYPE_TEXT.equals(messageType)
-                    && !SolaceConstants.MESSAGE_TYPE_BYTES.equals(messageType)
-                    && !SolaceConstants.MESSAGE_TYPE_XML.equals(messageType)) {
-                handleException("Unsupported messageType '" + messageType
-                        + "'. Supported types: TEXT, BYTES, XML.", messageContext);
-                return;
-            }
+            // The reply body and the properties are read here, before any broker call, so a payload fault sends
+            // nothing.
+            PayloadCodec.Outgoing payload = PayloadCodec.readOutgoing(messageContext, "sendReply");
+            SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext, "sendReply");
 
-            // Get reply payload and detect its content type for downstream subscribers
-            String[] payloadAndType = SolaceUtils.extractPayloadAndContentType(messageContext);
-            String payload = payloadAndType[0];
-            String httpContentType = payloadAndType[1];
-
-            // Build optional message properties
-            SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext);
-
-            // The publish acknowledgement of a guaranteed reply, read as publishMessage reads them.
-            String waitForAckStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.WAIT_FOR_ACK);
-            boolean waitForAck = StringUtils.isEmpty(waitForAckStr) ? true : Boolean.parseBoolean(waitForAckStr);
-            String ackTimeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                    SolaceConstants.ACK_TIMEOUT);
-            long ackTimeout = SolaceUtils.parseLongOrDefault(ackTimeoutStr,
-                    SolaceConstants.DEFAULT_ACK_TIMEOUT_MS, SolaceConstants.ACK_TIMEOUT);
-
-            BytesXMLMessage replyMessage = MessageBuilder.createMessage(messageType, payload, messageContext);
-            if (httpContentType != null && !httpContentType.isEmpty()) {
-                replyMessage.setHTTPContentType(httpContentType);
-            }
+            BytesXMLMessage replyMessage = MessageBuilder.createMessage(messageType, payload, messageContext,
+                    "sendReply");
+            replyMessage.setHTTPContentType(payload.contentType());
             MessageBuilder.applyDeliveryMode(replyMessage, deliveryMode);
 
             // Echo correlationId and applicationMessageId from the request if the caller
@@ -212,6 +185,13 @@ public class SolaceSendReply extends AbstractConnectorOperation {
                     log.error("solace.sendReply: txId=" + txId + " not found in TransactionRegistry");
                     handleException("Transaction " + txId + " not found", messageContext);
                     return;
+                }
+                // The reply goes through the transaction's pinned connection, so the operation's connection must
+                // be the transaction's. Checked before any command is submitted, the transaction stays open.
+                if (!connectionName.equals(entry.connectionName)) {
+                    throw new SolaceFault(FAULT_TRANSACTION_CONNECTION_MISMATCH,
+                            ERROR_CODE_TRANSACTION_CONNECTION_MISMATCH, "operation on connection " + connectionName
+                            + " inside the transaction of connection " + entry.connectionName);
                 }
                 TransactionBridge.submitAndWait(entry.executor, new TransactionCommand<>(() -> {
                     String correlationKey = MessageBuilder.newCorrelationKey("tx");

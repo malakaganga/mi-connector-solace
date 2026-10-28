@@ -20,7 +20,6 @@ package org.wso2.integration.connector.operation;
 
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.XMLMessage;
-import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
@@ -32,6 +31,7 @@ import org.wso2.integration.connector.core.AbstractConnectorOperation;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
 import org.wso2.integration.connector.settlement.HandleCompletion;
 import org.wso2.integration.connector.settlement.SettlementResult;
+import org.wso2.integration.connector.utils.OperationParameters;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -56,12 +56,16 @@ public class SolaceAcknowledgeMessage extends AbstractConnectorOperation {
 
     @Override
     public void execute(MessageContext messageContext, String responseVariable, Boolean overwriteBody) {
-        String target = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.TARGET);
-        if (StringUtils.isEmpty(target)) {
-            target = SolaceConstants.TARGET_INBOUND;
+        // Parsed before any handle is read or any lease settled: an unknown target settles nothing.
+        String target;
+        try {
+            target = OperationParameters.target(messageContext);
+        } catch (SolaceFault fault) {
+            fault(fault, messageContext, responseVariable);
+            return;
         }
         SettlementResult result;
-        if (SolaceConstants.TARGET_POLL.equalsIgnoreCase(target)) {
+        if (SolaceConstants.TARGET_POLL.equals(target)) {
             Object stashed = messageContext.getProperty(SolaceConstants.SOLACE_POLL_MESSAGE);
             if (!(stashed instanceof PollLease)) {
                 fault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,

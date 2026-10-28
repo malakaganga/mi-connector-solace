@@ -30,7 +30,7 @@ import org.wso2.integration.connector.core.AbstractConnector;
 import org.wso2.integration.connector.core.ConnectException;
 import org.wso2.integration.connector.core.connection.ConnectionHandler;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
-import org.wso2.integration.connector.utils.SolaceUtils;
+import org.wso2.integration.connector.utils.OperationParameters;
 
 import java.util.concurrent.Executor;
 
@@ -70,11 +70,8 @@ public class SolaceBeginTransaction extends AbstractConnector {
                 return;
             }
 
-            String timeoutStr = (String) ConnectorUtils.lookupTemplateParamater(
-                    messageContext, SolaceConstants.TX_TIMEOUT_MILLIS);
-            long timeoutMillis = SolaceUtils.parseLongOrDefault(timeoutStr,
-                    Long.parseLong(SolaceConstants.DEFAULT_TX_TIMEOUT_MILLIS),
-                    SolaceConstants.TX_TIMEOUT_MILLIS);
+            long timeoutMillis = OperationParameters.longValue(messageContext, SolaceConstants.TX_TIMEOUT_MILLIS,
+                    Long.parseLong(SolaceConstants.DEFAULT_TX_TIMEOUT_MILLIS), 1L, Integer.MAX_VALUE);
             log.debug("solace.beginTransaction: connectionName=" + connectionName
                     + ", timeoutMillis=" + timeoutMillis);
 
@@ -115,7 +112,7 @@ public class SolaceBeginTransaction extends AbstractConnector {
             ((Axis2MessageContext) messageContext).getAxis2MessageContext()
                     .setProperty(SolaceConstants.TX_CONNECTION_ID, txId);
 
-            log.info("solace.beginTransaction: started txId=" + txId + " (timeout=" + timeoutMillis + "ms)");
+            log.debug("solace.beginTransaction: started txId=" + txId + " (timeout=" + timeoutMillis + "ms)");
         } catch (SolaceFault fault) {
             // Before the entry exists the holder is returned here, the baseline rule.
             if (connection != null && !registered) {

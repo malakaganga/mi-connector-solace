@@ -71,7 +71,7 @@ public class SolaceRollback extends AbstractConnector {
             TransactionExecutor.CompletionCommand completion = entry.executor.completionCommand(false);
             entry.executor.execute(completion);
             completion.get(TX_COMPLETION_WAIT_MS, TimeUnit.MILLISECONDS);
-            log.info("solace.rollback: txId=" + txId + " rolled back successfully");
+            log.debug("solace.rollback: txId=" + txId + " rolled back successfully");
         } catch (TimeoutException e) {
             fault(FAULT_UNKNOWN, ERROR_CODE_UNKNOWN, "completion of transaction " + txId + " did not finish within "
                     + TX_COMPLETION_WAIT_MS + " ms; it continues on its owner", null, messageContext);

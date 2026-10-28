@@ -22,6 +22,7 @@
     <parameter name="maxMessages" description="Maximum number of messages to return (default: 10)."/>
     <parameter name="browseTimeout" description="Maximum time to wait per message read in milliseconds (default: 2000). Browse stops once no message arrives within this window."/>
     <parameter name="selector" description="Optional JMS-style selector expression to filter messages (e.g., region = 'EU' AND priority &gt; 5)."/>
+    <parameter name="contentType" description="The content type every browsed message is read with, for example application/json. It wins over the type the message declares. Empty uses the declared type, else the default of the message class. The payload is never inspected. A value without a charset takes the charset the message declares, else UTF-8."/>
     <parameter name="responseVariable" description="The name of the variable to which the result JSON (with messages array) is stored."/>
     <parameter name="overwriteBody" description="Unused for browse — messages are returned via the response variable."/>
     <sequence>

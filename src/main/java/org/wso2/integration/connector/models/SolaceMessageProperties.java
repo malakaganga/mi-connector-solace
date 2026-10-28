@@ -33,7 +33,7 @@ public class SolaceMessageProperties {
     private String senderId;
     private String replyToDestinationType;
     private String replyToDestinationName;
-    private Map<String, String> userProperties;
+    private Map<String, Object> userProperties;
     private Boolean dmqEligible;
     private Boolean elidingEligible;
     private Long expiration;
@@ -102,11 +102,11 @@ public class SolaceMessageProperties {
         this.replyToDestinationName = replyToDestinationName;
     }
 
-    public Map<String, String> getUserProperties() {
+    public Map<String, Object> getUserProperties() {
         return userProperties;
     }
 
-    public void setUserProperties(Map<String, String> userProperties) {
+    public void setUserProperties(Map<String, Object> userProperties) {
         this.userProperties = userProperties;
     }
 

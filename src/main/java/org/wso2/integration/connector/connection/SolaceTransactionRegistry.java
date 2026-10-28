@@ -95,7 +95,7 @@ public final class SolaceTransactionRegistry {
             throw new SolaceFault(FAULT_CONNECTION_ERROR, ERROR_CODE_CONNECTION_ERROR,
                     "transaction registration failed on connection " + connection.getConnectionId() + ": " + e, e);
         }
-        log.info("TransactionRegistry: registered txId=" + txId + " (connectionName=" + connectionName
+        log.debug("TransactionRegistry: registered txId=" + txId + " (connectionName=" + connectionName
                 + ", connectionId=" + connection.getConnectionId() + ", timeoutMillis=" + timeoutMillis
                 + ", activeCount=" + entries.size() + ")");
         return entry;
@@ -157,6 +157,8 @@ public final class SolaceTransactionRegistry {
         public final String connectionName;
         public final String txId;
         public final TransactionExecutor executor;
+        // The one outstanding consuming poll of this transaction, and whether it consumed.
+        public final PollAdmission pollAdmission;
         // Set by closeAdmission(): no command runs after it.
         volatile boolean terminal;
         // Set when a command was cut off while running: the completion rolls back even on commit.
@@ -167,6 +169,7 @@ public final class SolaceTransactionRegistry {
             this.connectionName = n;
             this.txId = txId;
             this.executor = new TransactionExecutor(this, txId, c.lc);
+            this.pollAdmission = new PollAdmission(txId);
         }
     }
 }

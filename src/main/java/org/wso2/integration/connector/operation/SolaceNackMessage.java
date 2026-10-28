@@ -21,7 +21,6 @@ package org.wso2.integration.connector.operation;
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.XMLMessage;
-import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.synapse.MessageContext;
@@ -33,6 +32,7 @@ import org.wso2.integration.connector.core.AbstractConnectorOperation;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
 import org.wso2.integration.connector.settlement.HandleCompletion;
 import org.wso2.integration.connector.settlement.SettlementResult;
+import org.wso2.integration.connector.utils.OperationParameters;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -64,20 +64,28 @@ public class SolaceNackMessage extends AbstractConnectorOperation {
 
     @Override
     public void execute(MessageContext messageContext, String responseVariable, Boolean overwriteBody) {
-        String target = (String) ConnectorUtils.lookupTemplateParamater(messageContext, SolaceConstants.TARGET);
-        if (StringUtils.isEmpty(target)) {
-            target = SolaceConstants.TARGET_INBOUND;
+        // Parsed before any handle is read or any lease settled: an unknown target settles nothing.
+        String target;
+        try {
+            target = OperationParameters.target(messageContext);
+        } catch (SolaceFault fault) {
+            fault(fault, messageContext, responseVariable);
+            return;
         }
 
-        String outcomeType = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.OUTCOME_TYPE);
-        if (StringUtils.isEmpty(outcomeType)) {
-            outcomeType = SolaceConstants.OUTCOME_FAILED;
+        // Strict as well: a typo must not turn a rejection into a redelivery.
+        String outcomeType;
+        try {
+            outcomeType = OperationParameters.choice(messageContext, SolaceConstants.OUTCOME_TYPE,
+                    SolaceConstants.OUTCOME_FAILED, SolaceConstants.OUTCOME_FAILED, SolaceConstants.OUTCOME_REJECTED);
+        } catch (SolaceFault fault) {
+            fault(fault, messageContext, responseVariable);
+            return;
         }
         // The handle value and the broker outcome of the same decision.
         XMLMessage.Outcome outcome;
         String handleValue;
-        if (SolaceConstants.OUTCOME_REJECTED.equalsIgnoreCase(outcomeType)) {
+        if (SolaceConstants.OUTCOME_REJECTED.equals(outcomeType)) {
             outcome = XMLMessage.Outcome.REJECTED;
             handleValue = HandleCompletion.VALUE_REJECTED;
         } else {
@@ -86,7 +94,7 @@ public class SolaceNackMessage extends AbstractConnectorOperation {
         }
 
         SettlementResult result;
-        if (SolaceConstants.TARGET_POLL.equalsIgnoreCase(target)) {
+        if (SolaceConstants.TARGET_POLL.equals(target)) {
             Object stashed = messageContext.getProperty(SolaceConstants.SOLACE_POLL_MESSAGE);
             if (!(stashed instanceof PollLease)) {
                 fault(FAULT_POLL_ERROR, ERROR_CODE_POLL_ERROR,

@@ -18,6 +18,7 @@
 
 package org.wso2.integration.connector.operation;
 
+import com.google.gson.JsonElement;
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.ConsumerFlowProperties;
 import com.solacesystems.jcsmp.DeliveryMode;
@@ -34,7 +35,6 @@ import org.apache.synapse.MessageContext;
 import org.apache.synapse.core.axis2.Axis2MessageContext;
 import org.json.JSONObject;
 
-import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -52,6 +52,9 @@ import org.wso2.integration.connector.core.AbstractConnectorOperation;
 import org.wso2.integration.connector.core.util.ConnectorUtils;
 import org.wso2.integration.connector.models.PublishResult;
 import org.wso2.integration.connector.models.SolaceMessageProperties;
+import org.wso2.integration.connector.utils.LegacyProperties;
+import org.wso2.integration.connector.utils.OperationParameters;
+import org.wso2.integration.connector.utils.PayloadCodec;
 import org.wso2.integration.connector.utils.SolaceUtils;
 
 import static org.wso2.integration.connector.constants.SolaceConstants.ERROR_CODE_CONNECTION_ERROR;
@@ -71,10 +74,18 @@ import static org.wso2.integration.connector.constants.SolaceConstants.FAULT_REQ
  * Sends a request message and blocks until a reply arrives or the timeout expires.
  * DIRECT delivery uses the JCSMP {@code Requestor}; PERSISTENT/NON_PERSISTENT delivery
  * uses a temporary queue with a {@code FlowReceiver} for guaranteed request-reply.
+ *
+ * <p>The request body is read through the platform formatter and the reply is decoded by the payload codec
+ * ({@link PayloadCodec}), by the reply's message class and content type: the {@code contentType} parameter,
+ * else the type the reply declares, else the default of the class. The parameter is checked before the request
+ * is published and applies to the reply only. The attributes come from the metadata helper: destination and
+ * destinationType are the request's, every other attribute describes the reply.</p>
  */
 public class SolaceSendRequest extends AbstractConnectorOperation {
     private static final Log log = LogFactory.getLog(SolaceSendRequest.class);
-    private static final long DEFAULT_TIMEOUT_MS = 30000L;
+    private static final int DEFAULT_TIMEOUT_MS = 30000;
+    // Replies with another correlation id discarded in one request before the operation faults.
+    private static final int MAX_MISMATCHED_REPLIES = 100;
 
     @Override
     public void execute(MessageContext messageContext, String responseVariable, Boolean overwriteBody) {
@@ -84,11 +95,30 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
             return;
         }
 
-        // Extract parameters
-        String destinationType = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.DESTINATION_TYPE);
-        if (StringUtils.isEmpty(destinationType)) {
-            destinationType = SolaceConstants.DESTINATION_TYPE_TOPIC;
+        // Every parameter is parsed first, so a bad value faults before any message is built or sent.
+        String destinationType;
+        String deliveryMode;
+        String messageType;
+        int timeout;
+        boolean waitForAck;
+        long ackTimeout;
+        // The reader override applies to the reply only. The request's type comes from the message context.
+        String replyContentType;
+        try {
+            destinationType = OperationParameters.destinationType(messageContext);
+            deliveryMode = OperationParameters.deliveryMode(messageContext);
+            messageType = OperationParameters.messageType(messageContext);
+            // An int from the parse: the JCSMP receive takes an int and the value is never narrowed from a long.
+            timeout = OperationParameters.intValue(messageContext, SolaceConstants.REQUEST_TIMEOUT,
+                    DEFAULT_TIMEOUT_MS, 1, Integer.MAX_VALUE);
+            // The publish acknowledgement of a guaranteed request, read as publishMessage reads them.
+            waitForAck = OperationParameters.flag(messageContext, SolaceConstants.WAIT_FOR_ACK, true);
+            ackTimeout = OperationParameters.ackTimeout(messageContext);
+            OperationParameters.checkMessageProperties(messageContext);
+            replyContentType = OperationParameters.contentType(messageContext);
+        } catch (SolaceFault fault) {
+            fault(fault, messageContext, responseVariable);
+            return;
         }
 
         String destinationName = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
@@ -96,12 +126,6 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
         if (StringUtils.isEmpty(destinationName)) {
             handleException("Destination name is required for sendRequest operation.", messageContext);
             return;
-        }
-
-        String deliveryMode = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.DELIVERY_MODE);
-        if (StringUtils.isEmpty(deliveryMode)) {
-            deliveryMode = SolaceConstants.DELIVERY_MODE_DIRECT;
         }
 
         if (SolaceConstants.DESTINATION_TYPE_QUEUE.equalsIgnoreCase(destinationType)
@@ -112,42 +136,20 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
             return;
         }
 
-        String messageType = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.MESSAGE_TYPE);
-        if (StringUtils.isEmpty(messageType)) {
-            messageType = SolaceConstants.MESSAGE_TYPE_TEXT;
-        }
-        messageType = messageType.toUpperCase();
-        // Solace has no JSON message type — JSON payloads are carried as TEXT on the wire.
-        if (!SolaceConstants.MESSAGE_TYPE_TEXT.equals(messageType)
-                && !SolaceConstants.MESSAGE_TYPE_BYTES.equals(messageType)
-                && !SolaceConstants.MESSAGE_TYPE_XML.equals(messageType)) {
-            handleException("Unsupported messageType '" + messageType
-                    + "'. Supported types: TEXT, BYTES, XML.", messageContext);
+        // The request message is prepared here, before any broker call, so a payload fault sends nothing.
+        final BytesXMLMessage request;
+        try {
+            PayloadCodec.Outgoing payload = PayloadCodec.readOutgoing(messageContext, "sendRequest");
+            SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext,
+                    "sendRequest");
+            request = MessageBuilder.createMessage(messageType, payload, messageContext, "sendRequest");
+            request.setHTTPContentType(payload.contentType());
+            request.setDeliveryMode(MessageBuilder.resolveDeliveryMode(deliveryMode));
+            MessageBuilder.applyMessageProperties(request, msgProperties);
+        } catch (SolaceFault fault) {
+            fault(fault.name, fault.code, fault.getMessage(), fault.getCause(), messageContext);
             return;
         }
-
-        String timeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.REQUEST_TIMEOUT);
-        long timeout = SolaceUtils.parseLongOrDefault(timeoutStr, DEFAULT_TIMEOUT_MS,
-                SolaceConstants.REQUEST_TIMEOUT);
-
-        // Get message payload and detect its content type for downstream subscribers
-        String[] payloadAndType = SolaceUtils.extractPayloadAndContentType(messageContext);
-        String payload = payloadAndType[0];
-        String httpContentType = payloadAndType[1];
-
-        // Build optional message properties
-        SolaceMessageProperties msgProperties = SolaceUtils.buildMessageProperties(messageContext);
-
-        // The publish acknowledgement of a guaranteed request, read as publishMessage reads them.
-        String waitForAckStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.WAIT_FOR_ACK);
-        boolean waitForAck = StringUtils.isEmpty(waitForAckStr) ? true : Boolean.parseBoolean(waitForAckStr);
-        String ackTimeoutStr = (String) ConnectorUtils.lookupTemplateParamater(messageContext,
-                SolaceConstants.ACK_TIMEOUT);
-        long ackTimeout = SolaceUtils.parseLongOrDefault(ackTimeoutStr,
-                SolaceConstants.DEFAULT_ACK_TIMEOUT_MS, SolaceConstants.ACK_TIMEOUT);
 
         String txId = (String) ((Axis2MessageContext) messageContext).getAxis2MessageContext()
                 .getProperty(SolaceConstants.TX_CONNECTION_ID);
@@ -197,13 +199,7 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
             }
 
             Destination destination = MessageBuilder.resolveDestination(destinationType, destinationName);
-            DeliveryMode resolvedMode = MessageBuilder.resolveDeliveryMode(deliveryMode);
-            BytesXMLMessage request = MessageBuilder.createMessage(messageType, payload, messageContext);
-            if (httpContentType != null && !httpContentType.isEmpty()) {
-                request.setHTTPContentType(httpContentType);
-            }
-            request.setDeliveryMode(resolvedMode);
-            MessageBuilder.applyMessageProperties(request, msgProperties);
+            DeliveryMode resolvedMode = request.getDeliveryMode();
 
             BytesXMLMessage response;
             if (resolvedMode == DeliveryMode.DIRECT) {
@@ -261,21 +257,11 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
                     throw new SolaceFault(FAULT_NACK, ERROR_CODE_NACK,
                             "the broker rejected the request: " + publishResult.getError());
                 }
-                // Phase C ends. The reply wait is bounded by the receive itself.
+                // Phase C ends. The reply wait is bounded by the receive itself, within the original deadline.
                 pub.finish();
-                remaining = requestDeadline - System.currentTimeMillis();
-                response = remaining > 0 ? flow.receive((int) remaining) : null;
+                response = receiveReply(flow, expectedCorrelationId, requestDeadline, destinationName, lc);
                 if (response == null) {
                     throw new JCSMPRequestTimeoutException("No reply received within " + timeout + "ms");
-                }
-
-                // Verify the reply corresponds to our request. A mismatch is unlikely on a fresh
-                // temp queue, but defensive logging makes cross-wiring easier to diagnose.
-                String replyCorrelationId = response.getCorrelationId();
-                if (replyCorrelationId != null && !expectedCorrelationId.equals(replyCorrelationId)) {
-                    log.warn("Guaranteed request-reply correlation mismatch: expected='"
-                            + expectedCorrelationId + "', received='" + replyCorrelationId
-                            + "'. Returning the message regardless.");
                 }
             }
 
@@ -285,61 +271,24 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
                 return;
             }
 
-            // Extract raw payload bytes from response
-            byte[] responseBytes = SolaceUtils.extractRawPayload(response);
-            String contentType = response.getHTTPContentType();
-            if (contentType == null || contentType.isEmpty()) {
-                contentType = SolaceUtils.inferContentType(response);
-            }
+            // The reply is decoded by its message class and content type, the override, else the declared type,
+            // else the class default, never by its first character.
+            PayloadCodec.Received received = PayloadCodec.decode(response, replyContentType, "sendRequest");
 
-            // Legacy solace.* context properties — kept for callers that read them directly.
-            messageContext.setProperty(SolaceConstants.SOLACE_DESTINATION, destinationName);
-            messageContext.setProperty(SolaceConstants.SOLACE_DELIVERY_MODE, deliveryMode);
-            if (response.getCorrelationId() != null) {
-                messageContext.setProperty(SolaceConstants.SOLACE_CORRELATION_ID, response.getCorrelationId());
-            }
-            if (response.getSenderId() != null) {
-                messageContext.setProperty(SolaceConstants.SOLACE_SENDER_ID, response.getSenderId());
-            }
-            if (response.getApplicationMessageId() != null) {
-                messageContext.setProperty(SolaceConstants.SOLACE_APPLICATION_MESSAGE_ID,
-                        response.getApplicationMessageId());
-            }
-            if (response.getApplicationMessageType() != null) {
-                messageContext.setProperty(SolaceConstants.SOLACE_APPLICATION_MESSAGE_TYPE,
-                        response.getApplicationMessageType());
-            }
-            if (response.getReceiveTimestamp() > 0) {
-                messageContext.setProperty(SolaceConstants.SOLACE_REPLY_RECEIVE_TIMESTAMP,
-                        response.getReceiveTimestamp());
-            }
+            // The legacy solace.* properties as one set, so nothing of an earlier message survives this result.
+            LegacyProperties.writeReply(messageContext, response, destinationName, deliveryMode);
 
-            // Build attributes (the metadata) and the payload (the reply content) and route
-            // both through handleConnectorResponse so ${vars.X.payload} works and the
-            // overwriteBody flag is honored consistently with other framework operations.
+            // The attributes: destination and destinationType stay the request's, every other attribute describes
+            // the reply. With overwriteBody the codec puts the reply in place as the body, native binary included,
+            // and the response metadata goes through the response API with overwrite false, never through the
+            // framework's JSON overwrite.
             Map<String, Object> attributes = new HashMap<>();
             attributes.put("destination", destinationName);
             attributes.put("destinationType", destinationType);
-            attributes.put("deliveryMode", deliveryMode);
-            attributes.put("contentType", contentType);
-            if (response.getCorrelationId() != null) {
-                attributes.put("correlationId", response.getCorrelationId());
-            }
-            if (response.getApplicationMessageId() != null) {
-                attributes.put("applicationMessageId", response.getApplicationMessageId());
-            }
-            if (response.getApplicationMessageType() != null) {
-                attributes.put("applicationMessageType", response.getApplicationMessageType());
-            }
-            if (response.getReceiveTimestamp() > 0) {
-                attributes.put("receiveTimestamp", response.getReceiveTimestamp());
-            }
-
-            String body = new String(responseBytes, StandardCharsets.UTF_8);
-            String payloadJson = SolaceUtils.looksLikeJson(body) ? body : JSONObject.quote(body);
-
-            handleConnectorResponse(messageContext, responseVariable, overwriteBody,
-                    payloadJson, null, attributes);
+            SolaceUtils.populateMessageMetadata(response, attributes);
+            JsonElement value = PayloadCodec.prepareResponse(messageContext, received, overwriteBody, attributes,
+                    "sendRequest");
+            handleConnectorResponse(messageContext, responseVariable, false, value, null, attributes);
 
             if (log.isDebugEnabled()) {
                 log.debug("Response received successfully for request to " + destinationName);
@@ -393,6 +342,43 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
         }
     }
 
+    /**
+     * Waits for the reply of a guaranteed request on its temporary queue. A reply whose correlation id is present
+     * and differs from the request's is discarded with a WARN and counted, and the wait goes on within the same
+     * absolute deadline. A reply without a correlation id is accepted. After the discard limit the operation
+     * faults, so a stream of foreign replies cannot keep it busy. The flow is auto acknowledged, so a discarded
+     * reply needs no settlement. Returns null when the deadline passes.
+     */
+    private BytesXMLMessage receiveReply(FlowReceiver flow, String expectedCorrelationId, long requestDeadline,
+                                         String destinationName, SolaceLogicalConnection lc)
+            throws JCSMPException, SolaceFault {
+        int discarded = 0;
+        while (true) {
+            long remaining = requestDeadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                return null;
+            }
+            // The request timeout is an int, so the remaining time fits one. Checked, never narrowed silently.
+            BytesXMLMessage reply = flow.receive(Math.toIntExact(remaining));
+            if (reply == null) {
+                return null;
+            }
+            String replyCorrelationId = reply.getCorrelationId();
+            if (replyCorrelationId == null || expectedCorrelationId.equals(replyCorrelationId)) {
+                return reply;
+            }
+            discarded++;
+            lc.counters.requestReplyMismatched.increment();
+            log.warn("SolaceConnector [" + lc.name + "] discarded a reply with correlationId '" + replyCorrelationId
+                    + "' while waiting for '" + expectedCorrelationId + "' from '" + destinationName + "'");
+            if (discarded >= MAX_MISMATCHED_REPLIES) {
+                throw new SolaceFault(FAULT_REQUEST_REPLY_ERROR, ERROR_CODE_REQUEST_REPLY_ERROR,
+                        discarded + " replies with another correlation id were discarded while waiting for '"
+                                + expectedCorrelationId + "' from '" + destinationName + "'");
+            }
+        }
+    }
+
     private void fault(SolaceFault fault, MessageContext messageContext, String responseVariable) {
         if (fault.outcomeUnknown) {
             Map<String, Object> attributes = new HashMap<>();
@@ -408,7 +394,4 @@ public class SolaceSendRequest extends AbstractConnectorOperation {
         ConnectorUtils.setErrorPropertiesToMessage(messageContext, String.valueOf(code), text);
         handleException(text, cause instanceof Exception ? (Exception) cause : null, messageContext);
     }
-
-    // Payload extraction / content-type inference moved to SolaceUtils (shared with the
-    // poll, browse, and requestCachedMessages operations).
 }

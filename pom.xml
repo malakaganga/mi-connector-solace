@@ -33,6 +33,7 @@
         <connector.core.version>0.9.3</connector.core.version>
         <config.mapper.version>1.1.0</config.mapper.version>
         <org.wso2.json.version>3.0.0.wso2v8</org.wso2.json.version>
+        <axis2.json.version>1.6.1-wso2v98</axis2.json.version>
         <maven.test.skip>true</maven.test.skip>
     </properties>
 
@@ -63,6 +64,29 @@
             <groupId>org.wso2.integration.connector.core</groupId>
             <artifactId>mi-connector-core</artifactId>
             <version>${connector.core.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- The legacy JSON builders of the pack, for the unit tests of the body install only. -->
+        <dependency>
+            <groupId>org.apache.axis2</groupId>
+            <artifactId>axis2-json</artifactId>
+            <version>${axis2.json.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.axis2</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.google.code.gson</groupId>
+                    <artifactId>gson</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.json.wso2</groupId>
