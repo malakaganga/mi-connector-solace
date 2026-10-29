@@ -121,11 +121,16 @@ jobs:
                               combo_text = f" Supported values: {', '.join(combo_values)}"
                               description = description + combo_text if description else combo_text.strip()
 
+                      # The store expects a string default value, so write a boolean as true or false
+                      default_value = value.get('defaultValue', '')
+                      if isinstance(default_value, bool):
+                          default_value = str(default_value).lower()
+
                       params.append({
                           'name': value.get('name', ''),
                           'type': input_type,
                           'required': value.get('required', '').lower() == 'true',
-                          'defaultValue': value.get('defaultValue', ''),
+                          'defaultValue': default_value,
                           'description': description
                       })
 
